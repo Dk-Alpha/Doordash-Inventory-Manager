@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+*.db
+.pytest_cache/
+
+# Internal design doc -- kept local, not published
+DoorDash Bulk Inventory Manager.docx
+
+# Real inventory data -- never publish
+inventory/

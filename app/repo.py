@@ -240,15 +240,50 @@ _WORKLIST_ITEM_SELECT = """
 """
 
 
-def list_worklist_items(conn: sqlite3.Connection, worklist_id: int, pending_only: bool = False) -> list[sqlite3.Row]:
+def build_worklist_item_filter_query(worklist_id: int, filters: dict) -> tuple[str, list]:
+    """Same search/category/price refinement as build_filter_query, scoped
+    to one work list's staged rows joined with their inventory data (the
+    "view") -- so search/filter/push here can never reach outside that work
+    list. filters keys: pending_only (bool), text1, text2, match_mode,
+    price_min, price_max, category_l1 (same meaning as build_filter_query,
+    just matched against the row's current inventory values)."""
+    clauses = ["wi.worklist_id = ?"]
+    params: list = [worklist_id]
+    if filters.get("pending_only"):
+        clauses.append("wi.applied = 0")
+
+    text_clauses, text_params = _text_search_clauses(filters, "i.item_name", "i.upc_padded", "i.sku_id")
+    clauses += text_clauses
+    params += text_params
+
+    pc_clauses, pc_params = _price_category_clauses(filters, "i.default_price", "i.category_l1")
+    clauses += pc_clauses
+    params += pc_params
+
+    return " AND ".join(clauses), params
+
+
+def list_worklist_items(conn: sqlite3.Connection, worklist_id: int, filters: Optional[dict] = None) -> list[sqlite3.Row]:
     """Worklist staging rows joined with their inventory row's current
     values, so the caller gets "current" (from inventory, authoritative)
-    and "proposed" (staged, editable) side by side."""
-    where = "wi.worklist_id = ?" + (" AND wi.applied = 0" if pending_only else "")
+    and "proposed" (staged, editable) side by side. filters: see
+    build_worklist_item_filter_query; omit/None for "every staged row"."""
+    where, params = build_worklist_item_filter_query(worklist_id, filters or {})
     return conn.execute(
-        f"{_WORKLIST_ITEM_SELECT} WHERE {where} ORDER BY i.item_name COLLATE NOCASE",
-        (worklist_id,),
+        f"{_WORKLIST_ITEM_SELECT} WHERE {where} ORDER BY i.item_name COLLATE NOCASE", params,
     ).fetchall()
+
+
+def list_worklist_item_ids(conn: sqlite3.Connection, worklist_id: int, filters: Optional[dict] = None) -> list[int]:
+    """Every worklist_item id matching a filter, for bulk actions ("push all
+    pending") that must act on the current filtered view, not every staged
+    row in the work list regardless of what's on screen."""
+    where, params = build_worklist_item_filter_query(worklist_id, filters or {})
+    rows = conn.execute(
+        f"SELECT wi.id FROM worklist_items wi JOIN inventory_items i ON i.id = wi.inventory_item_id WHERE {where}",
+        params,
+    ).fetchall()
+    return [r[0] for r in rows]
 
 
 def get_worklist_item(conn: sqlite3.Connection, worklist_item_id: int) -> Optional[sqlite3.Row]:
@@ -347,6 +382,50 @@ def worklist_pending_summary(conn: sqlite3.Connection, worklist_id: int) -> dict
 
 
 # --------------------------------------------------------------- filters ---
+#
+# The "layer 2 operates on layer 1" pattern used everywhere a grid needs
+# search/category/price refinement: a caller first builds a scope clause
+# that defines *the view* (e.g. "this store's existing items", "this store's
+# new items", "this one work list's staged rows") and ANDs the shared
+# refinement clauses below onto it. Because it's all one WHERE clause, a
+# search/filter/bulk-action can never reach outside the scope it started
+# from -- there's no separate "layer" to accidentally query around.
+
+def _text_search_clauses(filters: dict, name_col: str, upc_col: str, sku_col: str) -> tuple[list, list]:
+    """The two-stage tokenized text search, reusable against either bare
+    inventory_items columns or aliased/joined ones (e.g. "i.item_name")."""
+    match_mode = filters.get("match_mode", "AND")
+    clauses = []
+    params: list = []
+    for text_key in ("text1", "text2"):
+        text = (filters.get(text_key) or "").strip()
+        if not text:
+            continue
+        tokens = text.split()
+        token_clauses = []
+        for token in tokens:
+            like = f"%{token}%"
+            token_clauses.append(f"({name_col} LIKE ? OR {upc_col} LIKE ? OR {sku_col} LIKE ?)")
+            params += [like, like, like]
+        joiner = " AND " if match_mode == "AND" else " OR "
+        clauses.append("(" + joiner.join(token_clauses) + ")")
+    return clauses, params
+
+
+def _price_category_clauses(filters: dict, price_col: str, category_col: str) -> tuple[list, list]:
+    clauses = []
+    params: list = []
+    if filters.get("price_min") is not None:
+        clauses.append(f"{price_col} >= ?")
+        params.append(filters["price_min"])
+    if filters.get("price_max") is not None:
+        clauses.append(f"{price_col} <= ?")
+        params.append(filters["price_max"])
+    if filters.get("category_l1"):
+        clauses.append(f"{category_col} = ?")
+        params.append(filters["category_l1"])
+    return clauses, params
+
 
 def build_filter_query(store_pk: int, filters: dict) -> tuple[str, list]:
     """Compose the two-stage text filter plus the advanced filter panel into
@@ -366,29 +445,14 @@ def build_filter_query(store_pk: int, filters: dict) -> tuple[str, list]:
         clauses.append("status = ?")
         params.append(status)
 
-    match_mode = filters.get("match_mode", "AND")
-    for text_key in ("text1", "text2"):
-        text = (filters.get(text_key) or "").strip()
-        if not text:
-            continue
-        tokens = text.split()
-        token_clauses = []
-        for token in tokens:
-            like = f"%{token}%"
-            token_clauses.append("(item_name LIKE ? OR upc_padded LIKE ? OR sku_id LIKE ?)")
-            params += [like, like, like]
-        joiner = " AND " if match_mode == "AND" else " OR "
-        clauses.append("(" + joiner.join(token_clauses) + ")")
+    text_clauses, text_params = _text_search_clauses(filters, "item_name", "upc_padded", "sku_id")
+    clauses += text_clauses
+    params += text_params
 
-    if filters.get("price_min") is not None:
-        clauses.append("default_price >= ?")
-        params.append(filters["price_min"])
-    if filters.get("price_max") is not None:
-        clauses.append("default_price <= ?")
-        params.append(filters["price_max"])
-    if filters.get("category_l1"):
-        clauses.append("category_l1 = ?")
-        params.append(filters["category_l1"])
+    pc_clauses, pc_params = _price_category_clauses(filters, "default_price", "category_l1")
+    clauses += pc_clauses
+    params += pc_params
+
     if filters.get("changed_only"):
         clauses.append("change_flag = 1")
     if filters.get("match_status") and filters["match_status"] != "all":

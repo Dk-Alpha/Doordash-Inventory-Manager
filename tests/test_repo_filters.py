@@ -194,3 +194,39 @@ def test_export_new_skus_blocks_on_missing_required_fields(conn, store, tmp_path
     content = open(out_path).read()
     assert "Incomplete" in content
     assert content.splitlines()[0] == ",".join(export.DOORDASH_COLUMNS)
+
+
+def test_worklist_items_can_be_searched_and_filtered_like_existing_items(conn, store):
+    """The Work Lists tab's search/category/price filters must narrow the
+    same way Existing Items' do -- and "push all" must only ever reach rows
+    matching the current filter, never the whole work list."""
+    repo.import_master(conn, store, [
+        {"upc_id": "1", "item_name": "Red Bull 8.4oz", "category_l1": "Beverages", "default_price": "3.00", "status": "active"},
+        {"upc_id": "2", "item_name": "Red Bull 12oz", "category_l1": "Beverages", "default_price": "3.50", "status": "active"},
+        {"upc_id": "3", "item_name": "Chips", "category_l1": "Snacks", "default_price": "2.00", "status": "active"},
+    ], "master.csv", {})
+    worklist_id, _batch_id, _result = repo.import_worklist(conn, store, [
+        {"upc_id": "1", "new_price": "3.25"},
+        {"upc_id": "2", "new_price": "3.75"},
+        {"upc_id": "3", "new_price": "2.25"},
+    ], "worklist.csv", {})
+
+    red_bull_only = repo.list_worklist_items(conn, worklist_id, {"text1": "red bull"})
+    assert len(red_bull_only) == 2
+
+    snacks_only = repo.list_worklist_items(conn, worklist_id, {"category_l1": "Snacks"})
+    assert len(snacks_only) == 1
+    assert snacks_only[0]["item_name"] == "Chips"
+
+    snacks_ids = repo.list_worklist_item_ids(conn, worklist_id, {"category_l1": "Snacks", "pending_only": True})
+    assert len(snacks_ids) == 1
+
+    # "Push all matching filter" must only push the filtered subset.
+    repo.push_worklist_items(conn, worklist_id, snacks_ids)
+    chips = conn.execute("SELECT * FROM inventory_items WHERE upc_normalized = '3'").fetchone()
+    assert chips["default_price"] == 2.25
+    red_bull_1 = conn.execute("SELECT * FROM inventory_items WHERE upc_normalized = '1'").fetchone()
+    assert red_bull_1["default_price"] == 3.00  # untouched -- wasn't in the filtered/pushed set
+
+    still_pending = repo.list_worklist_item_ids(conn, worklist_id, {"pending_only": True})
+    assert len(still_pending) == 2

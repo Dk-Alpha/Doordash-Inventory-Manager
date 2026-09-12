@@ -180,21 +180,25 @@ class WorklistItemsTableModel(QAbstractTableModel):
         super().__init__(parent)
         self.conn = conn
         self.worklist_id: int | None = None
-        self.pending_only = False
+        self.filters: dict = {}
         self.columns = columns
         self._rows: list = []
         self._checked: set[int] = set()
         self.editable_fields = editable_fields
         self.on_cell_edit = on_cell_edit
 
-    def set_worklist(self, worklist_id: int | None, pending_only: bool = False):
+    def set_worklist(self, worklist_id: int | None, filters: dict | None = None):
         self.worklist_id = worklist_id
-        self.pending_only = pending_only
+        self.filters = filters or {}
+        self.refresh()
+
+    def set_filters(self, filters: dict):
+        self.filters = filters
         self.refresh()
 
     def refresh(self):
         self.beginResetModel()
-        self._rows = list(repo.list_worklist_items(self.conn, self.worklist_id, self.pending_only)) \
+        self._rows = list(repo.list_worklist_items(self.conn, self.worklist_id, self.filters)) \
             if self.worklist_id is not None else []
         self.endResetModel()
 

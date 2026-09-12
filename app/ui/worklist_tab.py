@@ -3,11 +3,16 @@ inventory before pushing them, and track each work list's lifecycle
 (open -> completed). Unmatched (new) rows from the same import still live in
 the New Items tab -- this tab only handles the matched/existing side, which
 previously had no review step at all (matches got written straight to
-inventory during import)."""
-from PySide6.QtCore import Qt
+inventory during import).
+
+Search/category/price filters here work exactly like Existing Items: they
+narrow the current work list's staged rows (the "view"), and every bulk
+action (select-all, push-all) acts only on what's currently in that
+narrowed view, never on the whole work list regardless of what's on screen."""
+from PySide6.QtCore import QTimer, Qt
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QHBoxLayout, QHeaderView, QLabel, QMessageBox,
-    QPushButton, QTableView, QVBoxLayout, QWidget,
+    QCheckBox, QComboBox, QDoubleSpinBox, QGroupBox, QHBoxLayout, QHeaderView,
+    QLabel, QLineEdit, QMessageBox, QPushButton, QTableView, QVBoxLayout, QWidget,
 )
 
 from app import repo
@@ -35,6 +40,8 @@ PROPOSED_L1_COL = [f for f, _ in COLUMNS].index("proposed_category_l1") + 1
 PROPOSED_L2_COL = [f for f, _ in COLUMNS].index("proposed_category_l2") + 1
 PROPOSED_STATUS_COL = [f for f, _ in COLUMNS].index("proposed_status") + 1
 
+DEBOUNCE_MS = 200
+
 
 class WorklistTab(QWidget):
     def __init__(self, conn, get_active_store_pk, on_data_changed, parent=None):
@@ -47,6 +54,11 @@ class WorklistTab(QWidget):
         self.model = WorklistItemsTableModel(
             conn, COLUMNS, editable_fields=EDITABLE_FIELDS, on_cell_edit=self._on_cell_edit,
         )
+
+        self._debounce = QTimer(self)
+        self._debounce.setSingleShot(True)
+        self._debounce.setInterval(DEBOUNCE_MS)
+        self._debounce.timeout.connect(self._reload_items)
 
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel(
@@ -63,10 +75,36 @@ class WorklistTab(QWidget):
         picker_row.addWidget(self.worklist_combo)
         self.pending_only = QCheckBox("Pending only")
         self.pending_only.setChecked(True)
-        self.pending_only.stateChanged.connect(self._reload_items)
+        self.pending_only.stateChanged.connect(self._debounce.start)
         picker_row.addWidget(self.pending_only)
         picker_row.addStretch()
         layout.addLayout(picker_row)
+
+        filter_row = QHBoxLayout()
+        self.filter1 = QLineEdit(placeholderText="Search item name / UPC / SKU…")
+        self.filter1.textChanged.connect(self._debounce.start)
+        filter_row.addWidget(self.filter1)
+        self.filter2 = QLineEdit(placeholderText="Narrow further…")
+        self.filter2.textChanged.connect(self._debounce.start)
+        filter_row.addWidget(self.filter2)
+        layout.addLayout(filter_row)
+
+        adv_box = QGroupBox("Advanced filters")
+        adv_layout = QHBoxLayout(adv_box)
+        adv_layout.addWidget(QLabel("Price min"))
+        self.price_min = QDoubleSpinBox(); self.price_min.setRange(0, 1_000_000); self.price_min.setSpecialValueText("")
+        self.price_min.valueChanged.connect(self._debounce.start)
+        adv_layout.addWidget(self.price_min)
+        adv_layout.addWidget(QLabel("Price max"))
+        self.price_max = QDoubleSpinBox(); self.price_max.setRange(0, 1_000_000); self.price_max.setValue(1_000_000)
+        self.price_max.valueChanged.connect(self._debounce.start)
+        adv_layout.addWidget(self.price_max)
+        adv_layout.addWidget(QLabel("Category"))
+        self.category_filter = QComboBox()
+        self.category_filter.addItem("All")
+        self.category_filter.currentIndexChanged.connect(self._debounce.start)
+        adv_layout.addWidget(self.category_filter)
+        layout.addWidget(adv_box)
 
         self.status_label = QLabel("")
         layout.addWidget(self.status_label)
@@ -86,7 +124,8 @@ class WorklistTab(QWidget):
         layout.addWidget(self.table)
 
         bulk_row = QHBoxLayout()
-        select_all_btn = QPushButton("Select All Pending")
+        select_all_btn = QPushButton("Select All Shown")
+        select_all_btn.setToolTip("Selects every pending row currently shown (i.e. matching the search/filters above).")
         select_all_btn.clicked.connect(self._select_all)
         bulk_row.addWidget(select_all_btn)
         clear_btn = QPushButton("Clear Selection")
@@ -95,7 +134,8 @@ class WorklistTab(QWidget):
         push_selected_btn = QPushButton("Push Selected to Inventory")
         push_selected_btn.clicked.connect(self._push_selected)
         bulk_row.addWidget(push_selected_btn)
-        push_all_btn = QPushButton("Push All Pending")
+        push_all_btn = QPushButton("Push All Matching Filter")
+        push_all_btn.setToolTip("Pushes every pending row matching the current search/filters -- not the whole work list.")
         push_all_btn.clicked.connect(self._push_all)
         bulk_row.addWidget(push_all_btn)
         layout.addLayout(bulk_row)
@@ -110,7 +150,34 @@ class WorklistTab(QWidget):
         lifecycle_row.addStretch()
         layout.addLayout(lifecycle_row)
 
-    # -- category dropdowns --------------------------------------------------
+    # -- filters ----------------------------------------------------------
+
+    def _current_filters(self) -> dict:
+        category = self.category_filter.currentText()
+        return {
+            "pending_only": self.pending_only.isChecked(),
+            "text1": self.filter1.text(),
+            "text2": self.filter2.text(),
+            "price_min": self.price_min.value() if self.price_min.value() > 0 else None,
+            "price_max": self.price_max.value() if self.price_max.value() < 1_000_000 else None,
+            "category_l1": category if category and category != "All" else None,
+        }
+
+    def _refresh_category_filter_options(self):
+        store_pk = self.get_active_store_pk()
+        if store_pk is None:
+            return
+        categories = repo.distinct_category_values(self.conn, store_pk, "category_l1")
+        current = self.category_filter.currentText()
+        self.category_filter.blockSignals(True)
+        self.category_filter.clear()
+        self.category_filter.addItem("All")
+        self.category_filter.addItems(categories)
+        idx = self.category_filter.findText(current)
+        self.category_filter.setCurrentIndex(idx if idx >= 0 else 0)
+        self.category_filter.blockSignals(False)
+
+    # -- category dropdowns (proposed-value cell editors) -------------------
 
     def _category_l1_options(self, index) -> list[str]:
         store_pk = self.get_active_store_pk()
@@ -129,6 +196,7 @@ class WorklistTab(QWidget):
     # -- worklist picker ------------------------------------------------------
 
     def refresh(self):
+        self._refresh_category_filter_options()
         store_pk = self.get_active_store_pk()
         current_id = self._current_worklist_id()
         self.worklist_combo.blockSignals(True)
@@ -177,7 +245,7 @@ class WorklistTab(QWidget):
 
     def _reload_items(self):
         worklist_id = self._current_worklist_id()
-        self.model.set_worklist(worklist_id, pending_only=self.pending_only.isChecked())
+        self.model.set_worklist(worklist_id, self._current_filters())
         self._update_status_label()
 
     def _update_status_label(self):
@@ -186,8 +254,8 @@ class WorklistTab(QWidget):
             self.status_label.setText("No work lists yet -- import one from the Import tab.")
             return
         self.status_label.setText(
-            f"Showing {self.model.total_count()} item(s) — status: {w['status']}, "
-            f"{w['pending_items']} pending / {w['total_items']} staged, "
+            f"Showing {self.model.total_count()} item(s) matching the current filter — "
+            f"status: {w['status']}, {w['pending_items']} pending / {w['total_items']} staged overall, "
             f"{w['new_items']} new item(s) from this import (see New Items tab)."
         )
 
@@ -251,18 +319,24 @@ class WorklistTab(QWidget):
         self._push_reminder()
 
     def _push_all(self):
+        """Pushes every pending row matching the *current* search/filters --
+        deliberately not repo.push_worklist_items(worklist_id, None), which
+        would reach past whatever's actually on screen and push the entire
+        work list regardless of an active search/filter."""
         worklist_id = self._current_worklist_id()
-        w = self._current_worklist_row()
-        if worklist_id is None or w is None:
+        if worklist_id is None:
             return
-        if w["pending_items"] == 0:
-            QMessageBox.information(self, "Nothing to push", "No pending changes in this work list.")
+        filters = self._current_filters()
+        filters["pending_only"] = True
+        ids = repo.list_worklist_item_ids(self.conn, worklist_id, filters)
+        if not ids:
+            QMessageBox.information(self, "Nothing to push", "No pending changes match the current filter.")
             return
         if QMessageBox.question(
-            self, "Confirm push", f"Push all {w['pending_items']} pending change(s) to inventory?"
+            self, "Confirm push", f"Push {len(ids)} pending change(s) matching the current filter to inventory?"
         ) != QMessageBox.Yes:
             return
-        repo.push_worklist_items(self.conn, worklist_id, None)
+        repo.push_worklist_items(self.conn, worklist_id, ids)
         self.refresh()
         self.on_data_changed()
         self._push_reminder()

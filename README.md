@@ -35,10 +35,17 @@ naive CSV import entirely.
    annotation rows, mixed encodings, malformed rows that would otherwise
    crash a plain CSV parser.
 2. **Import a work list** — any UPC list, with or without price/status/name
-   columns. Every row is matched against your current inventory by a
-   normalized UPC (leading-zero-safe), and split automatically into:
-   - **Existing Items** — matched rows, with any proposed changes attached,
-     ready to review.
+   columns. Every work list gets its own ID and shows up in **Work Lists**.
+   Every row is matched against your current inventory by a normalized UPC
+   (leading-zero-safe) — the UPC only ever *locates* the item; a matched
+   row's name/category/price always come from inventory, never from the
+   work list file, since work-list data can be stale — and split
+   automatically into:
+   - **Work Lists** — matched rows, staged with their proposed changes for
+     review and editing. Nothing touches your real inventory until you
+     explicitly push a work list's changes (all at once, or row-by-row).
+     Once you're done with a work list, mark it completed; every pushed
+     change is tagged with the work list that caused it.
    - **New Items** — unmatched rows, flagged for onboarding, with inline
      fields to complete the required data before export.
 3. **Two-stage search & filter** — e.g. type "red bull", then narrow to
@@ -103,26 +110,29 @@ pytest
 
 ## Project layout
 
-- `app/db.py` — SQLite schema (stores, inventory items, changelog, import
-  history, remembered column-mapping presets)
+- `app/db.py` — SQLite schema (stores, inventory items, work lists + staged
+  work-list items, changelog, import history, remembered column-mapping
+  presets)
 - `app/upc.py` — UPC normalization (handles Excel's leading-zero stripping)
 - `app/matching.py` — the work-list-vs-inventory matching engine (pure
   function, unit tested)
 - `app/importers.py` — CSV/XLSX reading: encoding/delimiter detection,
   leading-annotation-row detection, fuzzy column detection
 - `app/repo.py` — data-access layer: filters, bulk status/price edits, undo,
-  dashboard stats
+  work-list staging/push/lifecycle, dashboard stats
 - `app/export.py` — Updated Inventory / New SKU CSV exports in DoorDash's
   column order, with pre-export validation
-- `app/ui/` — PySide6 UI: Dashboard / Existing Items / New Items / Import /
-  Settings tabs
+- `app/ui/` — PySide6 UI: Dashboard / Existing Items / New Items / Work
+  Lists / Import / Settings tabs
 
 ## Scope
 
 **Built:** import + column mapping (with remembered presets), UPC matching
-engine, Existing/New item segregation, two-stage + advanced filtering,
-inline edit, bulk status/price edit with confirmation + undo, multi-store
-support, both CSV exports with pre-export validation/summary.
+engine, Existing/New item segregation, work lists as a trackable staged-
+review entity (open/completed lifecycle, per-work-list changelog tagging),
+two-stage + advanced filtering, inline edit, bulk status/price edit with
+confirmation + undo, multi-store support, both CSV exports with pre-export
+validation/summary.
 
 **Deliberately deferred:** a fuzzy UPC typo-suggestion panel, a packaged
 installer (PyInstaller), category-taxonomy management.

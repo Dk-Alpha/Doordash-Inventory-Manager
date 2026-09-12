@@ -6,7 +6,7 @@ from app import repo
 
 
 class DashboardTab(QWidget):
-    def __init__(self, conn, get_active_store_pk, go_to_import, go_to_existing, go_to_new, parent=None):
+    def __init__(self, conn, get_active_store_pk, go_to_import, go_to_existing, go_to_new, go_to_worklists, parent=None):
         super().__init__(parent)
         self.conn = conn
         self.get_active_store_pk = get_active_store_pk
@@ -21,6 +21,7 @@ class DashboardTab(QWidget):
         self.inactive_label = QLabel("-")
         self.pending_label = QLabel("-")
         self.new_label = QLabel("-")
+        self.open_worklists_label = QLabel("-")
         self.last_import_label = QLabel("-")
         for row, (caption, widget) in enumerate([
             ("Total SKUs", self.total_label),
@@ -28,6 +29,7 @@ class DashboardTab(QWidget):
             ("Inactive", self.inactive_label),
             ("Pending unsaved changes", self.pending_label),
             ("New items awaiting SKU export", self.new_label),
+            ("Open work lists", self.open_worklists_label),
             ("Last import", self.last_import_label),
         ]):
             grid.addWidget(QLabel(caption + ":"), row, 0)
@@ -47,6 +49,9 @@ class DashboardTab(QWidget):
         view_new_btn = QPushButton("View New Items")
         view_new_btn.clicked.connect(go_to_new)
         action_row.addWidget(view_new_btn)
+        view_worklists_btn = QPushButton("View Work Lists")
+        view_worklists_btn.clicked.connect(go_to_worklists)
+        action_row.addWidget(view_worklists_btn)
         layout.addLayout(action_row)
 
         export_row = QVBoxLayout()
@@ -70,6 +75,7 @@ class DashboardTab(QWidget):
         self.inactive_label.setText(str(stats["inactive"]))
         self.pending_label.setText(str(stats["pending_changes"]))
         self.new_label.setText(str(stats["new_items"]))
+        self.open_worklists_label.setText(str(stats["open_worklists"]))
         self.last_import_label.setText(stats["last_import"] or "never")
 
     def _export_inventory(self):
@@ -91,4 +97,10 @@ class DashboardTab(QWidget):
         if not path:
             return
         out_path = export_mod.export_updated_inventory(self.conn, store_pk, path)
-        QMessageBox.information(self, "Exported", f"Updated inventory exported to:\n{out_path}")
+        QMessageBox.information(
+            self, "Exported",
+            f"Updated inventory exported to:\n{out_path}\n\n"
+            "This file contains your FULL current inventory -- upload it to DoorDash as-is, "
+            "not merged with an older file. Once DoorDash approves the update, re-import "
+            "DoorDash's latest export back into this app to stay in sync.",
+        )

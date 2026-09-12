@@ -19,6 +19,16 @@ def test_worklist_item_with_no_inventory_match_is_new():
     assert result.new[0].upc_normalized == "222222222222"
 
 
+def test_item_name_from_worklist_is_never_a_proposed_change_for_matched_rows():
+    """UPCs are unique and authoritative; a work list's own item name may be
+    stale or wrong. A matched row's name must always come from inventory --
+    only new_price/new_status/category are legitimate proposed changes."""
+    inventory = [{"upc_id": "1", "item_name": "Canonical Name"}]
+    worklist = [{"upc_id": "1", "item_name": "Different Name From Worklist", "new_price": "2.00"}]
+    result = match_worklist(inventory, worklist)
+    assert result.existing[0].proposed_changes == {"new_price": "2.00"}
+
+
 def test_worklist_with_only_upcs_still_matches():
     inventory = [{"upc_id": "555555555555", "item_name": "Chips"}]
     worklist = [{"upc_id": "555555555555"}]

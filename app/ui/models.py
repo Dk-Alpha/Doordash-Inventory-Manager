@@ -167,3 +167,124 @@ class InventoryTableModel(QAbstractTableModel):
 
     def total_count(self) -> int:
         return self._total
+
+
+class WorklistItemsTableModel(QAbstractTableModel):
+    """Backs the Work Lists tab grid: worklist_items staged rows joined with
+    their inventory row's current values (see repo.list_worklist_items).
+    Small enough per work list that it's loaded in one shot rather than
+    paginated like InventoryTableModel."""
+
+    def __init__(self, conn, columns: list[tuple[str, str]], parent=None,
+                 editable_fields: frozenset = frozenset(), on_cell_edit=None):
+        super().__init__(parent)
+        self.conn = conn
+        self.worklist_id: int | None = None
+        self.pending_only = False
+        self.columns = columns
+        self._rows: list = []
+        self._checked: set[int] = set()
+        self.editable_fields = editable_fields
+        self.on_cell_edit = on_cell_edit
+
+    def set_worklist(self, worklist_id: int | None, pending_only: bool = False):
+        self.worklist_id = worklist_id
+        self.pending_only = pending_only
+        self.refresh()
+
+    def refresh(self):
+        self.beginResetModel()
+        self._rows = list(repo.list_worklist_items(self.conn, self.worklist_id, self.pending_only)) \
+            if self.worklist_id is not None else []
+        self.endResetModel()
+
+    def rowCount(self, parent=QModelIndex()):
+        return 0 if parent.isValid() else len(self._rows)
+
+    def columnCount(self, parent=QModelIndex()):
+        return len(self.columns) + 1  # +1 for the checkbox column
+
+    def data(self, index, role=Qt.DisplayRole):
+        if not index.isValid():
+            return None
+        row = self._rows[index.row()]
+        if index.column() == 0:
+            if role == Qt.CheckStateRole:
+                return Qt.Checked if row["worklist_item_id"] in self._checked else Qt.Unchecked
+            return None
+        field, _ = self.columns[index.column() - 1]
+        if role in (Qt.DisplayRole, Qt.EditRole):
+            value = row[field]
+            if field in ("current_price", "proposed_price") and value is not None:
+                return f"{value:.2f}"
+            if field == "applied":
+                return "Yes" if value else ""
+            return value if value is not None else ""
+        return None
+
+    def setData(self, index, value, role=Qt.EditRole):
+        if not index.isValid():
+            return False
+        row = self._rows[index.row()]
+        if index.column() == 0 and role == Qt.CheckStateRole:
+            if value == Qt.Checked:
+                self._checked.add(row["worklist_item_id"])
+            else:
+                self._checked.discard(row["worklist_item_id"])
+            self.dataChanged.emit(index, index, [Qt.CheckStateRole])
+            return True
+
+        if index.column() > 0 and role == Qt.EditRole:
+            field, _ = self.columns[index.column() - 1]
+            if field not in self.editable_fields or self.on_cell_edit is None or row["applied"]:
+                return False
+            ok = self.on_cell_edit(row["worklist_item_id"], field, value)
+            if not ok:
+                return False
+            fresh = repo.get_worklist_item(self.conn, row["worklist_item_id"])
+            if fresh is not None:
+                self._rows[index.row()] = fresh
+                self.dataChanged.emit(
+                    self.index(index.row(), 1), self.index(index.row(), self.columnCount() - 1)
+                )
+            return True
+        return False
+
+    def flags(self, index):
+        base = Qt.ItemIsEnabled | Qt.ItemIsSelectable
+        if index.column() == 0:
+            return base | Qt.ItemIsUserCheckable
+        field, _ = self.columns[index.column() - 1]
+        row = self._rows[index.row()]
+        if field in self.editable_fields and not row["applied"]:
+            return base | Qt.ItemIsEditable
+        return base
+
+    def headerData(self, section, orientation, role=Qt.DisplayRole):
+        if role != Qt.DisplayRole or orientation != Qt.Horizontal:
+            return None
+        if section == 0:
+            return ""
+        return self.columns[section - 1][1]
+
+    def row_at(self, row_index: int):
+        return self._rows[row_index]
+
+    def checked_ids(self) -> list[int]:
+        return list(self._checked)
+
+    def checked_count(self) -> int:
+        return len(self._checked)
+
+    def select_all_loaded(self):
+        self.beginResetModel()
+        self._checked |= {r["worklist_item_id"] for r in self._rows if not r["applied"]}
+        self.endResetModel()
+
+    def clear_selection(self):
+        self.beginResetModel()
+        self._checked = set()
+        self.endResetModel()
+
+    def total_count(self) -> int:
+        return len(self._rows)

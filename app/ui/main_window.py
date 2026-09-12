@@ -8,6 +8,7 @@ from app.ui.existing_items_tab import ExistingItemsTab
 from app.ui.import_tab import ImportTab
 from app.ui.new_items_tab import NewItemsTab
 from app.ui.settings_tab import SettingsTab
+from app.ui.worklist_tab import WorklistTab
 
 ACTIVE_STORE_SETTING_KEY = "active_store_id"
 
@@ -38,15 +39,21 @@ class MainWindow(QMainWindow):
             go_to_import=lambda: self.tabs.setCurrentWidget(self.import_tab),
             go_to_existing=lambda: self.tabs.setCurrentWidget(self.existing_tab),
             go_to_new=lambda: self.tabs.setCurrentWidget(self.new_tab),
+            go_to_worklists=lambda: self.tabs.setCurrentWidget(self.worklist_tab),
         )
         self.existing_tab = ExistingItemsTab(conn, self.get_active_store_pk, self.refresh_all)
         self.new_tab = NewItemsTab(conn, self.get_active_store_pk, self.refresh_all)
-        self.import_tab = ImportTab(conn, self.get_active_store_pk, self.refresh_all)
+        self.worklist_tab = WorklistTab(conn, self.get_active_store_pk, self.refresh_all)
+        self.import_tab = ImportTab(
+            conn, self.get_active_store_pk, self.refresh_all,
+            on_worklist_imported=self._go_to_worklist,
+        )
         self.settings_tab = SettingsTab(conn, self._reload_stores)
 
         self.tabs.addTab(self.dashboard_tab, "Dashboard")
         self.tabs.addTab(self.existing_tab, "Existing Items")
         self.tabs.addTab(self.new_tab, "New Items")
+        self.tabs.addTab(self.worklist_tab, "Work Lists")
         self.tabs.addTab(self.import_tab, "Import")
         self.tabs.addTab(self.settings_tab, "Settings")
 
@@ -89,3 +96,8 @@ class MainWindow(QMainWindow):
         self.dashboard_tab.refresh()
         self.existing_tab.refresh()
         self.new_tab.refresh()
+        self.worklist_tab.refresh()
+
+    def _go_to_worklist(self, worklist_id: int):
+        self.tabs.setCurrentWidget(self.worklist_tab)
+        self.worklist_tab.select_worklist(worklist_id)

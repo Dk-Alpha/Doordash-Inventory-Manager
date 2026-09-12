@@ -143,9 +143,15 @@ def _fetch_inventory_as_dicts(conn: sqlite3.Connection, store_pk: int) -> list[d
 
 
 def import_worklist(conn: sqlite3.Connection, store_pk: int, rows: list[dict], filename: str, mapping: dict):
-    """Match worklist rows against current inventory for this store, apply
-    proposed changes to existing items, and insert unmatched rows as
-    match_status='new'. Returns (batch_id, MatchResult)."""
+    """Match worklist rows against current inventory for this store.
+
+    Matched rows are NOT written to inventory_items here -- they're staged
+    as worklist_items for review/editing in the Work Lists tab, and only
+    applied when the user pushes them (see push_worklist_items). Unmatched
+    rows are inserted as match_status='new', same as before.
+
+    Returns (worklist_id, batch_id, MatchResult).
+    """
     import json
 
     store = conn.execute("SELECT * FROM stores WHERE id = ?", (store_pk,)).fetchone()
@@ -154,7 +160,7 @@ def import_worklist(conn: sqlite3.Connection, store_pk: int, rows: list[dict], f
         "INSERT INTO import_batches(store_id, kind, filename, imported_at, column_mapping_json) VALUES (?, 'worklist', ?, ?, ?)",
         (store_pk, filename, now_iso(), json.dumps(mapping)),
     ).lastrowid
-    batch_action_id = new_batch_action_id()
+    worklist_id = create_worklist(conn, store_pk, batch_id, filename)
 
     inventory_rows = _fetch_inventory_as_dicts(conn, store_pk)
     result = match_worklist(
@@ -164,53 +170,17 @@ def import_worklist(conn: sqlite3.Connection, store_pk: int, rows: list[dict], f
 
     for matched in result.existing:
         item_id = matched.inventory_row["id"]
-        current = conn.execute("SELECT * FROM inventory_items WHERE id = ?", (item_id,)).fetchone()
         changes = matched.proposed_changes
-        if not changes:
-            continue
-
-        first_edit = current["change_flag"] == 0
-        set_clauses = []
-        params = []
-
-        if "item_name" in changes:
-            set_clauses.append("item_name = ?")
-            params.append(changes["item_name"])
-        if "category_l1" in changes:
-            set_clauses.append("category_l1 = ?")
-            params.append(changes["category_l1"])
-        if "category_l2" in changes:
-            set_clauses.append("category_l2 = ?")
-            params.append(changes["category_l2"])
-        if "new_price" in changes:
-            new_price = parse_price(changes["new_price"])
-            if new_price is not None:
-                conn.execute(
-                    "INSERT INTO changelog(item_id, field, old_value, new_value, changed_at, batch_action_id) VALUES (?, 'default_price', ?, ?, ?, ?)",
-                    (item_id, current["default_price"], new_price, now_iso(), batch_action_id),
-                )
-                set_clauses.append("default_price = ?")
-                params.append(new_price)
-        if "new_status" in changes:
-            new_status = normalize_status(changes["new_status"])
-            conn.execute(
-                "INSERT INTO changelog(item_id, field, old_value, new_value, changed_at, batch_action_id) VALUES (?, 'status', ?, ?, ?, ?)",
-                (item_id, current["status"], new_status, now_iso(), batch_action_id),
-            )
-            set_clauses.append("status = ?")
-            params.append(new_status)
-
-        if not set_clauses:
-            continue
-
-        if first_edit:
-            set_clauses += ["original_price = ?", "original_status = ?"]
-            params += [current["default_price"], current["status"]]
-
-        set_clauses += ["change_flag = 1", "last_modified_ts = ?"]
-        params.append(now_iso())
-        params.append(item_id)
-        conn.execute(f"UPDATE inventory_items SET {', '.join(set_clauses)} WHERE id = ?", params)
+        proposed_price = parse_price(changes["new_price"]) if "new_price" in changes else None
+        proposed_status = normalize_status(changes["new_status"]) if "new_status" in changes else None
+        conn.execute(
+            """INSERT INTO worklist_items(
+                worklist_id, inventory_item_id, proposed_price, proposed_status,
+                proposed_category_l1, proposed_category_l2, applied, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, 0, ?)""",
+            (worklist_id, item_id, proposed_price, proposed_status,
+             changes.get("category_l1"), changes.get("category_l2"), now_iso()),
+        )
 
     for new_row in result.new:
         wl = new_row.worklist_row
@@ -220,15 +190,160 @@ def import_worklist(conn: sqlite3.Connection, store_pk: int, rows: list[dict], f
             """INSERT INTO inventory_items(
                 store_id, upc_normalized, upc_padded, sku_id, item_name, category_l1, category_l2,
                 default_price, status, currency, match_status, source, last_modified_ts,
-                change_flag, original_price, original_status, import_batch_id
-            ) VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, 'new', 'worklist', ?, 0, NULL, NULL, ?)""",
+                change_flag, original_price, original_status, import_batch_id, worklist_id
+            ) VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, 'new', 'worklist', ?, 0, NULL, NULL, ?, ?)""",
             (store_pk, new_row.upc_normalized, pad_upc(new_row.upc_normalized), wl.get("item_name"),
              wl.get("category_l1"), wl.get("category_l2"), price, status,
-             store["currency"] if store else "USD", now_iso(), batch_id),
+             store["currency"] if store else "USD", now_iso(), batch_id, worklist_id),
         )
 
     conn.commit()
-    return batch_id, result
+    return worklist_id, batch_id, result
+
+
+# -------------------------------------------------------------- worklists --
+
+def create_worklist(conn: sqlite3.Connection, store_pk: int, import_batch_id: int, filename: str) -> int:
+    cur = conn.execute(
+        "INSERT INTO worklists(store_id, import_batch_id, filename, status, created_at) VALUES (?, ?, ?, 'open', ?)",
+        (store_pk, import_batch_id, filename, now_iso()),
+    )
+    return cur.lastrowid
+
+
+def list_worklists(conn: sqlite3.Connection, store_pk: int) -> list[sqlite3.Row]:
+    """Worklists for this store, newest first, with staged/applied/new-item
+    counts for the picker label."""
+    return conn.execute(
+        """SELECT w.*,
+                  (SELECT COUNT(*) FROM worklist_items wi WHERE wi.worklist_id = w.id) AS total_items,
+                  (SELECT COUNT(*) FROM worklist_items wi WHERE wi.worklist_id = w.id AND wi.applied = 0) AS pending_items,
+                  (SELECT COUNT(*) FROM inventory_items i WHERE i.worklist_id = w.id AND i.match_status = 'new') AS new_items
+           FROM worklists w
+           WHERE w.store_id = ?
+           ORDER BY w.created_at DESC""",
+        (store_pk,),
+    ).fetchall()
+
+
+def get_worklist(conn: sqlite3.Connection, worklist_id: int) -> Optional[sqlite3.Row]:
+    return conn.execute("SELECT * FROM worklists WHERE id = ?", (worklist_id,)).fetchone()
+
+
+_WORKLIST_ITEM_SELECT = """
+    SELECT wi.id AS worklist_item_id, wi.worklist_id, wi.applied, wi.applied_at,
+           wi.proposed_price, wi.proposed_status, wi.proposed_category_l1, wi.proposed_category_l2,
+           i.id AS inventory_item_id, i.upc_padded, i.sku_id, i.item_name,
+           i.category_l1 AS current_category_l1, i.category_l2 AS current_category_l2,
+           i.default_price AS current_price, i.status AS current_status
+    FROM worklist_items wi JOIN inventory_items i ON i.id = wi.inventory_item_id
+"""
+
+
+def list_worklist_items(conn: sqlite3.Connection, worklist_id: int, pending_only: bool = False) -> list[sqlite3.Row]:
+    """Worklist staging rows joined with their inventory row's current
+    values, so the caller gets "current" (from inventory, authoritative)
+    and "proposed" (staged, editable) side by side."""
+    where = "wi.worklist_id = ?" + (" AND wi.applied = 0" if pending_only else "")
+    return conn.execute(
+        f"{_WORKLIST_ITEM_SELECT} WHERE {where} ORDER BY i.item_name COLLATE NOCASE",
+        (worklist_id,),
+    ).fetchall()
+
+
+def get_worklist_item(conn: sqlite3.Connection, worklist_item_id: int) -> Optional[sqlite3.Row]:
+    return conn.execute(f"{_WORKLIST_ITEM_SELECT} WHERE wi.id = ?", (worklist_item_id,)).fetchone()
+
+
+def update_worklist_item_proposed(conn: sqlite3.Connection, worklist_item_id: int, fields: dict) -> None:
+    """Edit a staged (not-yet-applied) worklist item's proposed values
+    before push -- the review/editing step."""
+    allowed = {"proposed_price", "proposed_status", "proposed_category_l1", "proposed_category_l2"}
+    set_clauses = []
+    params = []
+    for k, v in fields.items():
+        if k not in allowed:
+            continue
+        set_clauses.append(f"{k} = ?")
+        params.append(v)
+    if not set_clauses:
+        return
+    params.append(worklist_item_id)
+    conn.execute(f"UPDATE worklist_items SET {', '.join(set_clauses)} WHERE id = ? AND applied = 0", params)
+    conn.commit()
+
+
+def push_worklist_items(conn: sqlite3.Connection, worklist_id: int, worklist_item_ids: Optional[list[int]] = None) -> str:
+    """Apply staged proposed changes onto real inventory rows -- the moment
+    a work list's edits actually take effect. worklist_item_ids=None targets
+    every not-yet-applied item in the work list. Returns a batch_action_id
+    (same changelog/undo mechanism as the other bulk actions), with every
+    changelog row tagged with worklist_id for future per-work-list history."""
+    batch_action_id = new_batch_action_id()
+
+    where = "worklist_id = ? AND applied = 0"
+    params: list = [worklist_id]
+    if worklist_item_ids is not None:
+        if not worklist_item_ids:
+            return batch_action_id
+        where += f" AND id IN ({','.join('?' * len(worklist_item_ids))})"
+        params += worklist_item_ids
+
+    staged_items = conn.execute(f"SELECT * FROM worklist_items WHERE {where}", params).fetchall()
+
+    for staged in staged_items:
+        item_id = staged["inventory_item_id"]
+        current = conn.execute("SELECT * FROM inventory_items WHERE id = ?", (item_id,)).fetchone()
+        if current is None:
+            continue
+
+        field_changes = []
+        if staged["proposed_price"] is not None and staged["proposed_price"] != current["default_price"]:
+            field_changes.append(("default_price", current["default_price"], staged["proposed_price"]))
+        if staged["proposed_status"] is not None and staged["proposed_status"] != current["status"]:
+            field_changes.append(("status", current["status"], staged["proposed_status"]))
+        if staged["proposed_category_l1"] not in (None, "") and staged["proposed_category_l1"] != current["category_l1"]:
+            field_changes.append(("category_l1", current["category_l1"], staged["proposed_category_l1"]))
+        if staged["proposed_category_l2"] not in (None, "") and staged["proposed_category_l2"] != current["category_l2"]:
+            field_changes.append(("category_l2", current["category_l2"], staged["proposed_category_l2"]))
+
+        if field_changes:
+            _apply_field_changes(conn, item_id, current, field_changes, batch_action_id, worklist_id=worklist_id)
+
+        conn.execute(
+            "UPDATE worklist_items SET applied = 1, applied_at = ? WHERE id = ?",
+            (now_iso(), staged["id"]),
+        )
+
+    conn.commit()
+    return batch_action_id
+
+
+def mark_worklist_completed(conn: sqlite3.Connection, worklist_id: int) -> None:
+    conn.execute(
+        "UPDATE worklists SET status = 'completed', completed_at = ? WHERE id = ?",
+        (now_iso(), worklist_id),
+    )
+    conn.commit()
+
+
+def reopen_worklist(conn: sqlite3.Connection, worklist_id: int) -> None:
+    conn.execute("UPDATE worklists SET status = 'open', completed_at = NULL WHERE id = ?", (worklist_id,))
+    conn.commit()
+
+
+def worklist_pending_summary(conn: sqlite3.Connection, worklist_id: int) -> dict:
+    """Counts used to warn before marking a work list completed."""
+    pending_changes = conn.execute(
+        "SELECT COUNT(*) AS n FROM worklist_items WHERE worklist_id = ? AND applied = 0", (worklist_id,)
+    ).fetchone()["n"]
+    new_items = conn.execute(
+        "SELECT * FROM inventory_items WHERE worklist_id = ? AND match_status = 'new'", (worklist_id,)
+    ).fetchall()
+    incomplete_new_items = sum(
+        1 for r in new_items if any(r[f] in (None, "") for f in REQUIRED_NEW_SKU_FIELDS)
+    )
+    return {"pending_changes": pending_changes, "incomplete_new_items": incomplete_new_items}
 
 
 # --------------------------------------------------------------- filters ---
@@ -340,27 +455,44 @@ def distinct_category_values(conn: sqlite3.Connection, store_pk: int, field: str
 
 # ---------------------------------------------------------- bulk actions ---
 
+def _apply_field_changes(
+    conn: sqlite3.Connection, item_id: int, current: sqlite3.Row, field_changes: list[tuple[str, Any, Any]],
+    batch_action_id: str, worklist_id: Optional[int] = None,
+) -> None:
+    """Shared write path for every kind of inventory field edit (bulk status,
+    bulk price, a work-list push): log each (field, old, new) to changelog
+    -- tagged with worklist_id when the change came from pushing a work list,
+    so its history stays traceable -- snapshot original_price/original_status
+    on the item's first-ever edit, and set change_flag."""
+    first_edit = current["change_flag"] == 0
+    set_clauses = []
+    params: list = []
+    for field, old_value, new_value in field_changes:
+        conn.execute(
+            """INSERT INTO changelog(item_id, field, old_value, new_value, changed_at, batch_action_id, worklist_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (item_id, field, old_value, new_value, now_iso(), batch_action_id, worklist_id),
+        )
+        set_clauses.append(f"{field} = ?")
+        params.append(new_value)
+
+    if first_edit:
+        set_clauses += ["original_price = ?", "original_status = ?"]
+        params += [current["default_price"], current["status"]]
+
+    set_clauses += ["change_flag = 1", "last_modified_ts = ?"]
+    params.append(now_iso())
+    params.append(item_id)
+    conn.execute(f"UPDATE inventory_items SET {', '.join(set_clauses)} WHERE id = ?", params)
+
+
 def apply_bulk_status(conn: sqlite3.Connection, item_ids: list[int], to_status: str) -> str:
     batch_action_id = new_batch_action_id()
     for item_id in item_ids:
         current = conn.execute("SELECT * FROM inventory_items WHERE id = ?", (item_id,)).fetchone()
         if current is None or current["status"] == to_status:
             continue
-        conn.execute(
-            "INSERT INTO changelog(item_id, field, old_value, new_value, changed_at, batch_action_id) VALUES (?, 'status', ?, ?, ?, ?)",
-            (item_id, current["status"], to_status, now_iso(), batch_action_id),
-        )
-        first_edit = current["change_flag"] == 0
-        if first_edit:
-            conn.execute(
-                "UPDATE inventory_items SET status = ?, change_flag = 1, last_modified_ts = ?, original_status = ? WHERE id = ?",
-                (to_status, now_iso(), current["status"], item_id),
-            )
-        else:
-            conn.execute(
-                "UPDATE inventory_items SET status = ?, change_flag = 1, last_modified_ts = ? WHERE id = ?",
-                (to_status, now_iso(), item_id),
-            )
+        _apply_field_changes(conn, item_id, current, [("status", current["status"], to_status)], batch_action_id)
     conn.commit()
     return batch_action_id
 
@@ -389,21 +521,9 @@ def apply_bulk_price(conn: sqlite3.Connection, item_ids: list[int], mode: str, v
         new_price = compute_new_price(current["default_price"], mode, value)
         if new_price == current["default_price"]:
             continue
-        conn.execute(
-            "INSERT INTO changelog(item_id, field, old_value, new_value, changed_at, batch_action_id) VALUES (?, 'default_price', ?, ?, ?, ?)",
-            (item_id, current["default_price"], new_price, now_iso(), batch_action_id),
+        _apply_field_changes(
+            conn, item_id, current, [("default_price", current["default_price"], new_price)], batch_action_id
         )
-        first_edit = current["change_flag"] == 0
-        if first_edit:
-            conn.execute(
-                "UPDATE inventory_items SET default_price = ?, change_flag = 1, last_modified_ts = ?, original_price = ? WHERE id = ?",
-                (new_price, now_iso(), current["default_price"], item_id),
-            )
-        else:
-            conn.execute(
-                "UPDATE inventory_items SET default_price = ?, change_flag = 1, last_modified_ts = ? WHERE id = ?",
-                (new_price, now_iso(), item_id),
-            )
     conn.commit()
     return batch_action_id
 
@@ -487,12 +607,16 @@ def dashboard_stats(conn: sqlite3.Connection, store_pk: int) -> dict:
     inactive = total - active
     pending = conn.execute("SELECT COUNT(*) AS n FROM inventory_items WHERE store_id = ? AND change_flag = 1", (store_pk,)).fetchone()["n"]
     new_count = conn.execute("SELECT COUNT(*) AS n FROM inventory_items WHERE store_id = ? AND match_status = 'new'", (store_pk,)).fetchone()["n"]
+    open_worklists = conn.execute(
+        "SELECT COUNT(*) AS n FROM worklists WHERE store_id = ? AND status = 'open'", (store_pk,)
+    ).fetchone()["n"]
     last_import = conn.execute(
         "SELECT imported_at FROM import_batches WHERE store_id = ? ORDER BY imported_at DESC LIMIT 1", (store_pk,)
     ).fetchone()
     return {
         "total": total, "active": active, "inactive": inactive,
         "pending_changes": pending, "new_items": new_count,
+        "open_worklists": open_worklists,
         "last_import": last_import["imported_at"] if last_import else None,
     }
 

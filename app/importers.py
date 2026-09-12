@@ -147,6 +147,22 @@ def _pick_delimiter(path: str, encoding: str) -> str:
     return sniff_csv_dialect(path)
 
 
+def _best_header_row_index(rows: list[list[str]]) -> int:
+    """Given raw preview rows (no header interpretation), guess which one
+    looks most like real field names, by counting exact alias matches.
+    Falls back to row 0 (the normal case) when nothing scores higher."""
+    if not rows:
+        return 0
+    best_idx = 0
+    best_score = _count_exact_alias_matches([str(v) for v in rows[0]])
+    for i in range(1, len(rows)):
+        score = _count_exact_alias_matches([str(v) for v in rows[i]])
+        if score > best_score:
+            best_score = score
+            best_idx = i
+    return best_idx
+
+
 def _detect_header_row(path: str, delimiter: str, encoding: str) -> int:
     """Some exports (Google-Sheets-style, with a frozen instructions row like
     "Read only" / "Can update" above the real headers) don't put column names
@@ -161,22 +177,64 @@ def _detect_header_row(path: str, delimiter: str, encoding: str) -> int:
         return 0
     if len(preview) == 0:
         return 0
-
-    best_idx = 0
-    best_score = _count_exact_alias_matches([str(v) for v in preview.iloc[0].tolist()])
-    for i in range(1, len(preview)):
-        row_cells = [str(v) for v in preview.iloc[i].tolist()]
-        score = _count_exact_alias_matches(row_cells)
-        if score > best_score:
-            best_score = score
-            best_idx = i
-    return best_idx
+    return _best_header_row_index(preview.fillna("").values.tolist())
 
 
-def _read_csv_best_effort(path: str, encoding: str) -> pd.DataFrame:
+def preview_rows(path: str, max_rows: int = 25) -> list[list[str]]:
+    """Read the first max_rows rows of a CSV/XLSX with no header
+    interpretation at all, for a "which row are the column names on?" UI
+    preview. Column names are not assumed to live in row 1 or 2 -- the
+    caller shows these raw rows and lets the user point at (or confirm an
+    auto-detected guess of) the real header row."""
+    ext = os.path.splitext(path)[1].lower()
+    if ext in (".xlsx", ".xls"):
+        df = pd.read_excel(path, header=None, dtype=str, nrows=max_rows)
+        return df.fillna("").astype(str).values.tolist()
+
+    last_err = None
+    for encoding in ("utf-8", "latin-1"):
+        try:
+            delimiter = _pick_delimiter(path, encoding)
+            df = pd.read_csv(
+                path, sep=delimiter, encoding=encoding, header=None, dtype=str,
+                nrows=max_rows, engine="python", on_bad_lines="skip",
+            )
+            return df.fillna("").astype(str).values.tolist()
+        except UnicodeDecodeError as e:
+            last_err = e
+            continue
+    raise last_err
+
+
+def guess_header_row(rows: list[list[str]]) -> int:
+    """Best-guess index (0-based) of which of `rows` (as returned by
+    preview_rows) looks most like the real column-name row."""
+    return _best_header_row_index(rows[:MAX_HEADER_SCAN_ROWS])
+
+
+def read_table_with_header_row(path: str, header_row: int) -> pd.DataFrame:
+    """Read CSV/XLSX as all-string columns using a caller-chosen (0-based)
+    header row index, e.g. one confirmed by the user in the import UI
+    rather than auto-detected."""
+    ext = os.path.splitext(path)[1].lower()
+    if ext in (".xlsx", ".xls"):
+        df = pd.read_excel(path, dtype=str, header=header_row)
+        if header_row > 0:
+            df.attrs["header_row_skipped"] = header_row
+        return df
+
+    last_err = None
+    for encoding in ("utf-8", "latin-1"):
+        try:
+            return _read_csv_at_header_row(path, encoding, header_row)
+        except UnicodeDecodeError as e:
+            last_err = e
+            continue
+    raise last_err
+
+
+def _read_csv_at_header_row(path: str, encoding: str, header_row: int) -> pd.DataFrame:
     delimiter = _pick_delimiter(path, encoding)
-    header_row = _detect_header_row(path, delimiter, encoding)
-
     try:
         df = pd.read_csv(path, dtype=str, sep=delimiter, encoding=encoding, header=header_row)
     except pd.errors.ParserError:
@@ -196,3 +254,9 @@ def _read_csv_best_effort(path: str, encoding: str) -> pd.DataFrame:
     if header_row > 0:
         df.attrs["header_row_skipped"] = header_row
     return df
+
+
+def _read_csv_best_effort(path: str, encoding: str) -> pd.DataFrame:
+    delimiter = _pick_delimiter(path, encoding)
+    header_row = _detect_header_row(path, delimiter, encoding)
+    return _read_csv_at_header_row(path, encoding, header_row)

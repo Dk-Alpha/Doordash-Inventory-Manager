@@ -10,8 +10,13 @@ from typing import Any, Optional
 from app.upc import normalize_upc
 
 # Optional worklist columns that represent an intended change to apply
-# during the bulk-review step, if present.
-PROPOSED_CHANGE_FIELDS = ["item_name", "new_price", "new_status", "category_l1", "category_l2"]
+# during the bulk-review step, if present. Deliberately excludes
+# "item_name": UPCs are unique and authoritative, but a work list's own item
+# name may be stale or simply wrong, so a matched row's name always comes
+# from inventory, never from the work list (name IS used for brand-new rows,
+# handled separately in repo.import_worklist since there's no inventory data
+# to pull for those).
+PROPOSED_CHANGE_FIELDS = ["new_price", "new_status", "category_l1", "category_l2"]
 
 
 @dataclass

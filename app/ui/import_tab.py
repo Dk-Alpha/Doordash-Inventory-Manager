@@ -6,14 +6,16 @@ from PySide6.QtWidgets import (
 
 from app import importers, repo
 from app.ui.column_mapping_dialog import ColumnMappingDialog
+from app.ui.header_row_dialog import HeaderRowDialog
 
 
 class ImportTab(QWidget):
-    def __init__(self, conn, get_active_store_pk, on_import_done, parent=None):
+    def __init__(self, conn, get_active_store_pk, on_import_done, on_worklist_imported=None, parent=None):
         super().__init__(parent)
         self.conn = conn
         self.get_active_store_pk = get_active_store_pk
         self.on_import_done = on_import_done
+        self.on_worklist_imported = on_worklist_imported
 
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel(
@@ -25,7 +27,8 @@ class ImportTab(QWidget):
 
         layout.addWidget(QLabel(
             "<b>Import Work List</b> — a CSV/XLSX of items to change, keyed by UPC. "
-            "Matches will update existing items; unmatched rows go to New Items."
+            "Matches are staged for review in the Work Lists tab (nothing is applied to "
+            "inventory until you push it); unmatched rows go to New Items."
         ))
         worklist_btn = QPushButton("Import Work List…")
         worklist_btn.clicked.connect(lambda: self._run_import("worklist"))
@@ -61,7 +64,19 @@ class ImportTab(QWidget):
             return
 
         try:
-            df = importers.read_table(path)
+            preview = importers.preview_rows(path)
+        except Exception as e:
+            QMessageBox.critical(self, "Import failed", f"Could not read file:\n{e}")
+            return
+
+        guessed_row = importers.guess_header_row(preview)
+        header_dialog = HeaderRowDialog(preview, guessed_row, parent=self)
+        if header_dialog.exec() != HeaderRowDialog.Accepted:
+            return
+        header_row = header_dialog.header_row_index()
+
+        try:
+            df = importers.read_table_with_header_row(path, header_row)
         except Exception as e:
             QMessageBox.critical(self, "Import failed", f"Could not read file:\n{e}")
             return
@@ -97,15 +112,16 @@ class ImportTab(QWidget):
         renamed = df.rename(columns=rename)
         rows = renamed.to_dict(orient="records")
 
+        worklist_id = None
         try:
             if kind == "master":
                 repo.import_master(self.conn, store_pk, rows, path, mapping)
                 self.log.append(f"Imported {len(rows)} master inventory rows from {path}")
             else:
-                _, result = repo.import_worklist(self.conn, store_pk, rows, path, mapping)
+                worklist_id, _batch_id, result = repo.import_worklist(self.conn, store_pk, rows, path, mapping)
                 self.log.append(
-                    f"Work list import: {len(result.existing)} matched existing items, "
-                    f"{len(result.new)} new items, {len(result.skipped_blank_upc)} skipped (no UPC)."
+                    f"Work list import: {len(result.existing)} matched item(s) staged for review in the "
+                    f"Work Lists tab, {len(result.new)} new item(s), {len(result.skipped_blank_upc)} skipped (no UPC)."
                 )
                 if result.inventory_duplicates:
                     self.log.append(f"WARNING: {len(result.inventory_duplicates)} duplicate UPC(s) in inventory.")
@@ -116,3 +132,5 @@ class ImportTab(QWidget):
             return
 
         self.on_import_done()
+        if worklist_id is not None and self.on_worklist_imported is not None:
+            self.on_worklist_imported(worklist_id)

@@ -49,22 +49,80 @@ def test_master_import_then_worklist_match_and_new_items(conn, store):
     repo.import_master(conn, store, master_rows, "master.csv", {})
 
     worklist_rows = [
-        {"upc_id": "111", "new_price": "2.99"},
+        {"upc_id": "111", "item_name": "Stale Name From Worklist", "new_price": "2.99"},
         {"upc_id": "999", "item_name": "Brand New Item", "new_price": "4.00"},
     ]
-    batch_id, result = repo.import_worklist(conn, store, worklist_rows, "worklist.csv", {})
+    worklist_id, batch_id, result = repo.import_worklist(conn, store, worklist_rows, "worklist.csv", {})
 
     assert len(result.existing) == 1
     assert len(result.new) == 1
 
-    updated = conn.execute("SELECT * FROM inventory_items WHERE upc_normalized = '111'").fetchone()
-    assert updated["default_price"] == 2.99
-    assert updated["change_flag"] == 1
-    assert updated["original_price"] == 2.5
+    # Matched rows are staged, not written to inventory yet -- the name and
+    # price must be untouched, and untouched by the worklist's own (possibly
+    # stale) item name in particular.
+    matched = conn.execute("SELECT * FROM inventory_items WHERE upc_normalized = '111'").fetchone()
+    assert matched["default_price"] == 2.5
+    assert matched["item_name"] == "Chips"
+    assert matched["change_flag"] == 0
+
+    staged = repo.list_worklist_items(conn, worklist_id)
+    assert len(staged) == 1
+    assert staged[0]["proposed_price"] == 2.99
+    assert staged[0]["item_name"] == "Chips"  # always from inventory, never the worklist file
 
     new_item = conn.execute("SELECT * FROM inventory_items WHERE upc_normalized = '999'").fetchone()
     assert new_item["match_status"] == "new"
     assert new_item["item_name"] == "Brand New Item"
+    assert new_item["worklist_id"] == worklist_id
+
+    # Pushing applies the staged change and records it against the work list.
+    repo.push_worklist_items(conn, worklist_id, None)
+    pushed = conn.execute("SELECT * FROM inventory_items WHERE upc_normalized = '111'").fetchone()
+    assert pushed["default_price"] == 2.99
+    assert pushed["change_flag"] == 1
+    assert pushed["original_price"] == 2.5
+
+    changelog_row = conn.execute(
+        "SELECT * FROM changelog WHERE item_id = ? AND field = 'default_price'", (pushed["id"],)
+    ).fetchone()
+    assert changelog_row["worklist_id"] == worklist_id
+
+
+def test_worklist_lifecycle_mark_completed_and_reopen(conn, store):
+    repo.import_master(conn, store, [{"upc_id": "1", "item_name": "A", "default_price": "1.00", "status": "active"}], "m.csv", {})
+    worklist_id, _batch_id, _result = repo.import_worklist(
+        conn, store, [{"upc_id": "1", "new_price": "2.00"}], "w.csv", {}
+    )
+
+    assert repo.get_worklist(conn, worklist_id)["status"] == "open"
+    summary = repo.worklist_pending_summary(conn, worklist_id)
+    assert summary["pending_changes"] == 1
+
+    repo.mark_worklist_completed(conn, worklist_id)
+    assert repo.get_worklist(conn, worklist_id)["status"] == "completed"
+
+    repo.reopen_worklist(conn, worklist_id)
+    assert repo.get_worklist(conn, worklist_id)["status"] == "open"
+
+
+def test_legacy_worklist_import_batches_are_backfilled_as_completed_worklists(conn, store):
+    import json
+
+    batch_id = conn.execute(
+        "INSERT INTO import_batches(store_id, kind, filename, imported_at, column_mapping_json) VALUES (?, 'worklist', ?, ?, ?)",
+        (store, "legacy.csv", "2024-01-01T00:00:00+00:00", json.dumps({})),
+    ).lastrowid
+    conn.commit()
+
+    db.init_db(conn)  # re-running the migration should backfill the legacy batch once
+
+    rows = conn.execute("SELECT * FROM worklists WHERE import_batch_id = ?", (batch_id,)).fetchall()
+    assert len(rows) == 1
+    assert rows[0]["status"] == "completed"
+
+    db.init_db(conn)  # idempotent -- must not duplicate on a second run
+    rows_again = conn.execute("SELECT * FROM worklists WHERE import_batch_id = ?", (batch_id,)).fetchall()
+    assert len(rows_again) == 1
 
 
 def test_bulk_status_and_undo(conn, store):

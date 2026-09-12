@@ -308,6 +308,44 @@ def update_worklist_item_proposed(conn: sqlite3.Connection, worklist_item_id: in
     conn.commit()
 
 
+def bulk_set_worklist_items_status(conn: sqlite3.Connection, worklist_item_ids: list[int], status: str) -> int:
+    """Set proposed_status on every given (not-yet-applied) staged item in
+    one action -- the work-list-side equivalent of apply_bulk_status,
+    except it only edits the staged proposal, not real inventory (that
+    still only happens on push). Returns the number of rows affected."""
+    if not worklist_item_ids:
+        return 0
+    placeholders = ",".join("?" * len(worklist_item_ids))
+    cur = conn.execute(
+        f"UPDATE worklist_items SET proposed_status = ? WHERE id IN ({placeholders}) AND applied = 0",
+        [status] + worklist_item_ids,
+    )
+    conn.commit()
+    return cur.rowcount
+
+
+def bulk_set_worklist_items_price(conn: sqlite3.Connection, worklist_item_ids: list[int], mode: str, value: float) -> int:
+    """Set proposed_price on every given (not-yet-applied) staged item in
+    one action, computed via compute_new_price from each row's CURRENT
+    inventory price (the base a %, margin, or flat-amount change is
+    relative to) -- the work-list-side equivalent of apply_bulk_price.
+    Returns the number of rows affected."""
+    if not worklist_item_ids:
+        return 0
+    placeholders = ",".join("?" * len(worklist_item_ids))
+    rows = conn.execute(
+        f"""SELECT wi.id AS worklist_item_id, i.default_price AS current_price
+            FROM worklist_items wi JOIN inventory_items i ON i.id = wi.inventory_item_id
+            WHERE wi.id IN ({placeholders}) AND wi.applied = 0""",
+        worklist_item_ids,
+    ).fetchall()
+    for row in rows:
+        new_price = compute_new_price(row["current_price"], mode, value)
+        conn.execute("UPDATE worklist_items SET proposed_price = ? WHERE id = ?", (new_price, row["worklist_item_id"]))
+    conn.commit()
+    return len(rows)
+
+
 def push_worklist_items(conn: sqlite3.Connection, worklist_id: int, worklist_item_ids: Optional[list[int]] = None) -> str:
     """Apply staged proposed changes onto real inventory rows -- the moment
     a work list's edits actually take effect. worklist_item_ids=None targets

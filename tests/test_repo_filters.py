@@ -230,3 +230,37 @@ def test_worklist_items_can_be_searched_and_filtered_like_existing_items(conn, s
 
     still_pending = repo.list_worklist_item_ids(conn, worklist_id, {"pending_only": True})
     assert len(still_pending) == 2
+
+
+def test_bulk_set_worklist_items_status_and_price(conn, store):
+    repo.import_master(conn, store, [
+        {"upc_id": "1", "item_name": "A", "default_price": "10.00", "status": "active"},
+        {"upc_id": "2", "item_name": "B", "default_price": "20.00", "status": "active"},
+    ], "master.csv", {})
+    worklist_id, _batch_id, _result = repo.import_worklist(conn, store, [
+        {"upc_id": "1"}, {"upc_id": "2"},
+    ], "worklist.csv", {})
+
+    staged = repo.list_worklist_items(conn, worklist_id)
+    ids = [r["worklist_item_id"] for r in staged]
+
+    affected = repo.bulk_set_worklist_items_status(conn, ids, "inactive")
+    assert affected == 2
+    staged = repo.list_worklist_items(conn, worklist_id)
+    assert all(r["proposed_status"] == "inactive" for r in staged)
+
+    affected = repo.bulk_set_worklist_items_price(conn, ids, "inc_pct", 10)
+    assert affected == 2
+    staged = {r["item_name"]: r for r in repo.list_worklist_items(conn, worklist_id)}
+    assert staged["A"]["proposed_price"] == 11.0
+    assert staged["B"]["proposed_price"] == 22.0
+
+    # inventory itself is untouched until push
+    a = conn.execute("SELECT * FROM inventory_items WHERE upc_normalized = '1'").fetchone()
+    assert a["default_price"] == 10.0
+    assert a["status"] == "active"
+
+    repo.push_worklist_items(conn, worklist_id, ids)
+    a = conn.execute("SELECT * FROM inventory_items WHERE upc_normalized = '1'").fetchone()
+    assert a["default_price"] == 11.0
+    assert a["status"] == "inactive"

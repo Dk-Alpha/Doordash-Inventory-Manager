@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
 )
 
 from app import repo
+from app.ui.bulk_price_dialog import BulkPriceDialog
 from app.ui.delegates import ComboBoxDelegate
 from app.ui.models import WorklistItemsTableModel
 
@@ -139,6 +140,19 @@ class WorklistTab(QWidget):
         push_all_btn.clicked.connect(self._push_all)
         bulk_row.addWidget(push_all_btn)
         layout.addLayout(bulk_row)
+
+        edit_row = QHBoxLayout()
+        edit_row.addWidget(QLabel("Set proposed values for the selected rows:"))
+        activate_btn = QPushButton("Activate Selected")
+        activate_btn.clicked.connect(lambda: self._bulk_status("active"))
+        edit_row.addWidget(activate_btn)
+        deactivate_btn = QPushButton("Deactivate Selected")
+        deactivate_btn.clicked.connect(lambda: self._bulk_status("inactive"))
+        edit_row.addWidget(deactivate_btn)
+        price_btn = QPushButton("Bulk Price Change…")
+        price_btn.clicked.connect(self._bulk_price)
+        edit_row.addWidget(price_btn)
+        layout.addLayout(edit_row)
 
         lifecycle_row = QHBoxLayout()
         self.complete_btn = QPushButton("Mark Work List Completed")
@@ -282,6 +296,41 @@ class WorklistTab(QWidget):
         else:
             repo.update_worklist_item_proposed(self.conn, worklist_item_id, {field: raw_value or None})
         return True
+
+    # -- bulk edit (staged proposed values, pre-push) -------------------------
+
+    def _confirm(self, ids: list[int], action_desc: str) -> bool:
+        if not ids:
+            QMessageBox.information(self, "No selection", "Check one or more rows first.")
+            return False
+        rows = self.model.rows_by_ids(set(ids))
+        sample = ", ".join((r["item_name"] or "(unnamed)") for r in rows[:5])
+        more = f" and {len(ids) - 5} more" if len(ids) > 5 else ""
+        resp = QMessageBox.question(
+            self, "Confirm bulk change",
+            f"{action_desc} for {len(ids)} item(s) in this work list?\n\nSample: {sample}{more}",
+        )
+        return resp == QMessageBox.Yes
+
+    def _bulk_status(self, to_status: str):
+        ids = self.model.checked_ids()
+        if not self._confirm(ids, f"Set proposed status to '{to_status}'"):
+            return
+        repo.bulk_set_worklist_items_status(self.conn, ids, to_status)
+        self._reload_items()
+
+    def _bulk_price(self):
+        ids = self.model.checked_ids()
+        if not ids:
+            QMessageBox.information(self, "No selection", "Check one or more rows first.")
+            return
+        dialog = BulkPriceDialog(len(ids), parent=self)
+        if dialog.exec() != BulkPriceDialog.Accepted:
+            return
+        if not self._confirm(ids, f"Set proposed price ({dialog.mode()}, {dialog.value()})"):
+            return
+        repo.bulk_set_worklist_items_price(self.conn, ids, dialog.mode(), dialog.value())
+        self._reload_items()
 
     # -- selection / push ------------------------------------------------------
 

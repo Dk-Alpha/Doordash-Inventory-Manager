@@ -292,3 +292,6 @@ class WorklistItemsTableModel(QAbstractTableModel):
 
     def total_count(self) -> int:
         return len(self._rows)
+
+    def rows_by_ids(self, worklist_item_ids: set) -> list:
+        return [r for r in self._rows if r["worklist_item_id"] in worklist_item_ids]

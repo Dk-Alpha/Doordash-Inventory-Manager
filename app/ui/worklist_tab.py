@@ -23,15 +23,15 @@ from app.ui.models import WorklistItemsTableModel
 COLUMNS = [
     ("upc_padded", "UPC"),
     ("item_name", "Item Name"),
-    ("current_category_l1", "Category 1"),
-    ("current_category_l2", "Category 2"),
-    ("current_price", "Price"),
-    ("current_status", "Status"),
-    ("proposed_category_l1", "New Category 1"),
-    ("proposed_category_l2", "New Category 2"),
-    ("proposed_price", "New Price"),
-    ("proposed_status", "New Status"),
-    ("applied", "Pushed"),
+    ("current_status", "Current Status"),
+    ("proposed_status", "Proposed Status (edit me)"),
+    ("current_price", "Current Price"),
+    ("proposed_price", "Proposed Price (edit me)"),
+    ("current_category_l1", "Current Category 1"),
+    ("proposed_category_l1", "Proposed Category 1 (edit me)"),
+    ("current_category_l2", "Current Category 2"),
+    ("proposed_category_l2", "Proposed Category 2 (edit me)"),
+    ("applied", "Pushed to Inventory"),
 ]
 
 EDITABLE_FIELDS = frozenset({"proposed_price", "proposed_status", "proposed_category_l1", "proposed_category_l2"})
@@ -63,9 +63,10 @@ class WorklistTab(QWidget):
 
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel(
-            "Review and adjust each work list's proposed changes before pushing them to "
-            "inventory. \"Item Name\"/current values always come from inventory -- a work "
-            "list only locates the item by UPC, it never overrides the name."
+            "<b>Double-click a \"Proposed ...\" cell (or select rows and use the buttons below) to set "
+            "what will change.</b> \"Current ...\" columns are read-only and always mirror today's "
+            "inventory -- they will NOT update until you push. Item Name always comes from inventory "
+            "-- a work list only locates the item by UPC, it never overrides the name."
         ))
 
         picker_row = QHBoxLayout()
@@ -142,14 +143,19 @@ class WorklistTab(QWidget):
         layout.addLayout(bulk_row)
 
         edit_row = QHBoxLayout()
-        edit_row.addWidget(QLabel("Set proposed values for the selected rows:"))
+        edit_row.addWidget(QLabel(
+            "Set proposed values for the selected rows (still needs Push above to reach inventory):"
+        ))
         activate_btn = QPushButton("Activate Selected")
+        activate_btn.setToolTip("Sets 'Proposed Status' to active for the checked rows. Push to apply it to inventory.")
         activate_btn.clicked.connect(lambda: self._bulk_status("active"))
         edit_row.addWidget(activate_btn)
         deactivate_btn = QPushButton("Deactivate Selected")
+        deactivate_btn.setToolTip("Sets 'Proposed Status' to inactive for the checked rows. Push to apply it to inventory.")
         deactivate_btn.clicked.connect(lambda: self._bulk_status("inactive"))
         edit_row.addWidget(deactivate_btn)
         price_btn = QPushButton("Bulk Price Change…")
+        price_btn.setToolTip("Sets 'Proposed Price' for the checked rows. Push to apply it to inventory.")
         price_btn.clicked.connect(self._bulk_price)
         edit_row.addWidget(price_btn)
         layout.addLayout(edit_row)
@@ -308,13 +314,15 @@ class WorklistTab(QWidget):
         more = f" and {len(ids) - 5} more" if len(ids) > 5 else ""
         resp = QMessageBox.question(
             self, "Confirm bulk change",
-            f"{action_desc} for {len(ids)} item(s) in this work list?\n\nSample: {sample}{more}",
+            f"{action_desc} for {len(ids)} item(s) in this work list?\n\n"
+            f"This only sets the Proposed column(s) -- it does NOT touch real inventory until you "
+            f"push. Sample: {sample}{more}",
         )
         return resp == QMessageBox.Yes
 
     def _bulk_status(self, to_status: str):
         ids = self.model.checked_ids()
-        if not self._confirm(ids, f"Set proposed status to '{to_status}'"):
+        if not self._confirm(ids, f"Set Proposed Status to '{to_status}'"):
             return
         repo.bulk_set_worklist_items_status(self.conn, ids, to_status)
         self._reload_items()
@@ -327,7 +335,7 @@ class WorklistTab(QWidget):
         dialog = BulkPriceDialog(len(ids), parent=self)
         if dialog.exec() != BulkPriceDialog.Accepted:
             return
-        if not self._confirm(ids, f"Set proposed price ({dialog.mode()}, {dialog.value()})"):
+        if not self._confirm(ids, f"Set Proposed Price ({dialog.mode()}, {dialog.value()})"):
             return
         repo.bulk_set_worklist_items_price(self.conn, ids, dialog.mode(), dialog.value())
         self._reload_items()

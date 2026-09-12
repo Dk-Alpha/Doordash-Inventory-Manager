@@ -2,6 +2,7 @@
 fetched from SQLite in pages (fetchMore) instead of loading everything into
 memory up front, so a 20k+ row inventory stays responsive."""
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt
+from PySide6.QtGui import QColor
 
 from app import repo
 
@@ -224,6 +225,11 @@ class WorklistItemsTableModel(QAbstractTableModel):
             if field == "applied":
                 return "Yes" if value else ""
             return value if value is not None else ""
+        if role == Qt.BackgroundRole and field in self.editable_fields and not row["applied"]:
+            # Editable "proposed" cells get a visible tint -- otherwise it's
+            # easy to miss that only these (not the read-only "current"
+            # columns right next to them) are what you edit.
+            return QColor(255, 250, 205)
         return None
 
     def setData(self, index, value, role=Qt.EditRole):

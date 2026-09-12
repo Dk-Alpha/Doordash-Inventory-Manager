@@ -158,6 +158,45 @@ def test_compute_new_price_multiply_matches_equivalent_percent_increase():
     assert repo.compute_new_price(10.0, "multiply", 1.25) == repo.compute_new_price(10.0, "inc_pct", 25)
 
 
+def test_worklist_items_can_be_reedited_and_repushed_after_first_push(conn, store):
+    """Regression: once a worklist_item was pushed once (applied=1), a
+    second bulk status/price change on it must not be silently ignored --
+    editing reopens it (applied resets to 0) so it can be pushed again."""
+    repo.import_master(conn, store, [
+        {"upc_id": "1", "item_name": "A", "default_price": "10.00", "status": "active"},
+        {"upc_id": "2", "item_name": "B", "default_price": "20.00", "status": "active"},
+    ], "master.csv", {})
+    worklist_id, _batch_id, _result = repo.import_worklist(conn, store, [
+        {"upc_id": "1", "new_status": "inactive"},
+        {"upc_id": "2", "new_status": "inactive"},
+    ], "worklist.csv", {})
+
+    ids = [r["worklist_item_id"] for r in repo.list_worklist_items(conn, worklist_id)]
+    repo.push_worklist_items(conn, worklist_id, ids)
+
+    a = conn.execute("SELECT * FROM inventory_items WHERE upc_normalized = '1'").fetchone()
+    assert a["status"] == "inactive"
+    assert repo.list_worklist_item_ids(conn, worklist_id, {"pending_only": True}) == []
+
+    # User now selects the (already-applied) items again -- e.g. via
+    # "Select All Shown" with "Pending only" unchecked -- and reactivates them.
+    affected = repo.bulk_set_worklist_items_status(conn, ids, "active")
+    assert affected == 2
+    # This must reopen them for another push, not silently no-op.
+    assert len(repo.list_worklist_item_ids(conn, worklist_id, {"pending_only": True})) == 2
+
+    repo.push_worklist_items(conn, worklist_id, ids)
+    a = conn.execute("SELECT * FROM inventory_items WHERE upc_normalized = '1'").fetchone()
+    assert a["status"] == "active"
+
+    # And a bulk price change after that should stack on the now-current price.
+    affected = repo.bulk_set_worklist_items_price(conn, ids, "inc_pct", 10)
+    assert affected == 2
+    repo.push_worklist_items(conn, worklist_id, ids)
+    a = conn.execute("SELECT * FROM inventory_items WHERE upc_normalized = '1'").fetchone()
+    assert a["default_price"] == 11.0
+
+
 def test_list_item_ids_returns_all_matches_unpaginated(conn, store):
     rows = [{"upc_id": str(i), "item_name": f"Item {i}", "default_price": "1", "status": "active"} for i in range(1, 6)]
     repo.import_master(conn, store, rows, "m.csv", {})

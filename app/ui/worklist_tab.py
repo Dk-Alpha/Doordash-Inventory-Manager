@@ -127,7 +127,10 @@ class WorklistTab(QWidget):
 
         bulk_row = QHBoxLayout()
         select_all_btn = QPushButton("Select All Shown")
-        select_all_btn.setToolTip("Selects every pending row currently shown (i.e. matching the search/filters above).")
+        select_all_btn.setToolTip(
+            "Selects every row currently shown (matching the search/filters above), "
+            "including already-pushed ones -- useful for making a second round of changes."
+        )
         select_all_btn.clicked.connect(self._select_all)
         bulk_row.addWidget(select_all_btn)
         clear_btn = QPushButton("Clear Selection")
@@ -144,18 +147,28 @@ class WorklistTab(QWidget):
 
         edit_row = QHBoxLayout()
         edit_row.addWidget(QLabel(
-            "Set proposed values for the selected rows (still needs Push above to reach inventory):"
+            "Set proposed values for the selected rows (still needs Push above to reach inventory; "
+            "works even on rows already pushed once -- it reopens them for another round):"
         ))
         activate_btn = QPushButton("Activate Selected")
-        activate_btn.setToolTip("Sets 'Proposed Status' to active for the checked rows. Push to apply it to inventory.")
+        activate_btn.setToolTip(
+            "Sets 'Proposed Status' to active for the checked rows (even if already pushed). "
+            "Push to apply it to inventory."
+        )
         activate_btn.clicked.connect(lambda: self._bulk_status("active"))
         edit_row.addWidget(activate_btn)
         deactivate_btn = QPushButton("Deactivate Selected")
-        deactivate_btn.setToolTip("Sets 'Proposed Status' to inactive for the checked rows. Push to apply it to inventory.")
+        deactivate_btn.setToolTip(
+            "Sets 'Proposed Status' to inactive for the checked rows (even if already pushed). "
+            "Push to apply it to inventory."
+        )
         deactivate_btn.clicked.connect(lambda: self._bulk_status("inactive"))
         edit_row.addWidget(deactivate_btn)
         price_btn = QPushButton("Bulk Price Change…")
-        price_btn.setToolTip("Sets 'Proposed Price' for the checked rows. Push to apply it to inventory.")
+        price_btn.setToolTip(
+            "Sets 'Proposed Price' for the checked rows (even if already pushed), computed from each "
+            "row's current inventory price. Push to apply it to inventory."
+        )
         price_btn.clicked.connect(self._bulk_price)
         edit_row.addWidget(price_btn)
         layout.addLayout(edit_row)

@@ -225,10 +225,12 @@ class WorklistItemsTableModel(QAbstractTableModel):
             if field == "applied":
                 return "Yes" if value else ""
             return value if value is not None else ""
-        if role == Qt.BackgroundRole and field in self.editable_fields and not row["applied"]:
+        if role == Qt.BackgroundRole and field in self.editable_fields:
             # Editable "proposed" cells get a visible tint -- otherwise it's
             # easy to miss that only these (not the read-only "current"
-            # columns right next to them) are what you edit.
+            # columns right next to them) are what you edit. Stays tinted
+            # even after a push: editing it again is still allowed (it just
+            # reopens the row for another push -- see update_worklist_item_proposed).
             return QColor(255, 250, 205)
         return None
 
@@ -246,7 +248,7 @@ class WorklistItemsTableModel(QAbstractTableModel):
 
         if index.column() > 0 and role == Qt.EditRole:
             field, _ = self.columns[index.column() - 1]
-            if field not in self.editable_fields or self.on_cell_edit is None or row["applied"]:
+            if field not in self.editable_fields or self.on_cell_edit is None:
                 return False
             ok = self.on_cell_edit(row["worklist_item_id"], field, value)
             if not ok:
@@ -265,8 +267,7 @@ class WorklistItemsTableModel(QAbstractTableModel):
         if index.column() == 0:
             return base | Qt.ItemIsUserCheckable
         field, _ = self.columns[index.column() - 1]
-        row = self._rows[index.row()]
-        if field in self.editable_fields and not row["applied"]:
+        if field in self.editable_fields:
             return base | Qt.ItemIsEditable
         return base
 
@@ -287,8 +288,11 @@ class WorklistItemsTableModel(QAbstractTableModel):
         return len(self._checked)
 
     def select_all_loaded(self):
+        """Selects every currently shown row -- including already-applied
+        ones, since editing/pushing again is a legitimate way to make a
+        second round of changes on the same work list item."""
         self.beginResetModel()
-        self._checked |= {r["worklist_item_id"] for r in self._rows if not r["applied"]}
+        self._checked |= {r["worklist_item_id"] for r in self._rows}
         self.endResetModel()
 
     def clear_selection(self):

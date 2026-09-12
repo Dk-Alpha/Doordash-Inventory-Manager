@@ -291,8 +291,13 @@ def get_worklist_item(conn: sqlite3.Connection, worklist_item_id: int) -> Option
 
 
 def update_worklist_item_proposed(conn: sqlite3.Connection, worklist_item_id: int, fields: dict) -> None:
-    """Edit a staged (not-yet-applied) worklist item's proposed values
-    before push -- the review/editing step."""
+    """Edit a staged worklist item's proposed values -- the review/editing
+    step. Allowed even after this item was already pushed once: editing it
+    implicitly reopens it for another push (applied reset to 0), since the
+    freshly-edited value hasn't been pushed yet regardless of whether an
+    earlier value already was. Without this, a second round of changes on
+    the same work list (e.g. "also update status" after already pushing a
+    price change) would silently do nothing."""
     allowed = {"proposed_price", "proposed_status", "proposed_category_l1", "proposed_category_l2"}
     set_clauses = []
     params = []
@@ -303,21 +308,23 @@ def update_worklist_item_proposed(conn: sqlite3.Connection, worklist_item_id: in
         params.append(v)
     if not set_clauses:
         return
+    set_clauses += ["applied = 0", "applied_at = NULL"]
     params.append(worklist_item_id)
-    conn.execute(f"UPDATE worklist_items SET {', '.join(set_clauses)} WHERE id = ? AND applied = 0", params)
+    conn.execute(f"UPDATE worklist_items SET {', '.join(set_clauses)} WHERE id = ?", params)
     conn.commit()
 
 
 def bulk_set_worklist_items_status(conn: sqlite3.Connection, worklist_item_ids: list[int], status: str) -> int:
-    """Set proposed_status on every given (not-yet-applied) staged item in
-    one action -- the work-list-side equivalent of apply_bulk_status,
-    except it only edits the staged proposal, not real inventory (that
-    still only happens on push). Returns the number of rows affected."""
+    """Set proposed_status on every given staged item in one action -- the
+    work-list-side equivalent of apply_bulk_status, except it only edits the
+    staged proposal, not real inventory (that still only happens on push).
+    Works even on items already pushed once (see update_worklist_item_proposed
+    for why). Returns the number of rows affected."""
     if not worklist_item_ids:
         return 0
     placeholders = ",".join("?" * len(worklist_item_ids))
     cur = conn.execute(
-        f"UPDATE worklist_items SET proposed_status = ? WHERE id IN ({placeholders}) AND applied = 0",
+        f"UPDATE worklist_items SET proposed_status = ?, applied = 0, applied_at = NULL WHERE id IN ({placeholders})",
         [status] + worklist_item_ids,
     )
     conn.commit()
@@ -325,23 +332,28 @@ def bulk_set_worklist_items_status(conn: sqlite3.Connection, worklist_item_ids: 
 
 
 def bulk_set_worklist_items_price(conn: sqlite3.Connection, worklist_item_ids: list[int], mode: str, value: float) -> int:
-    """Set proposed_price on every given (not-yet-applied) staged item in
-    one action, computed via compute_new_price from each row's CURRENT
-    inventory price (the base a %, margin, or flat-amount change is
-    relative to) -- the work-list-side equivalent of apply_bulk_price.
-    Returns the number of rows affected."""
+    """Set proposed_price on every given staged item in one action, computed
+    via compute_new_price from each row's CURRENT inventory price (the base
+    a %, margin, or flat-amount change is relative to -- for an item already
+    pushed once, that's the price from that earlier push, so a second "+10%"
+    correctly stacks on top of it) -- the work-list-side equivalent of
+    apply_bulk_price. Works even on items already pushed once (see
+    update_worklist_item_proposed). Returns the number of rows affected."""
     if not worklist_item_ids:
         return 0
     placeholders = ",".join("?" * len(worklist_item_ids))
     rows = conn.execute(
         f"""SELECT wi.id AS worklist_item_id, i.default_price AS current_price
             FROM worklist_items wi JOIN inventory_items i ON i.id = wi.inventory_item_id
-            WHERE wi.id IN ({placeholders}) AND wi.applied = 0""",
+            WHERE wi.id IN ({placeholders})""",
         worklist_item_ids,
     ).fetchall()
     for row in rows:
         new_price = compute_new_price(row["current_price"], mode, value)
-        conn.execute("UPDATE worklist_items SET proposed_price = ? WHERE id = ?", (new_price, row["worklist_item_id"]))
+        conn.execute(
+            "UPDATE worklist_items SET proposed_price = ?, applied = 0, applied_at = NULL WHERE id = ?",
+            (new_price, row["worklist_item_id"]),
+        )
     conn.commit()
     return len(rows)
 

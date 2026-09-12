@@ -5,7 +5,10 @@ from PySide6.QtWidgets import (
     QTableView, QVBoxLayout, QWidget,
 )
 
+from PySide6.QtCore import Qt
+
 from app import export, repo
+from app.ui.delegates import ComboBoxDelegate
 from app.ui.models import InventoryTableModel
 
 COLUMNS = [
@@ -19,6 +22,10 @@ COLUMNS = [
 ]
 
 EDITABLE_FIELDS = frozenset({"item_name", "category_l1", "category_l2", "default_price", "status", "currency"})
+
+# +1 to account for the checkbox column the grid always prepends.
+CATEGORY_L1_COL = [f for f, _ in COLUMNS].index("category_l1") + 1
+CATEGORY_L2_COL = [f for f, _ in COLUMNS].index("category_l2") + 1
 
 
 class NewItemsTab(QWidget):
@@ -42,6 +49,12 @@ class NewItemsTab(QWidget):
         self.table.setModel(self.model)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
         self.table.horizontalHeader().setStretchLastSection(True)
+
+        self.l1_delegate = ComboBoxDelegate(self._category_l1_options, self.table)
+        self.l2_delegate = ComboBoxDelegate(self._category_l2_options, self.table)
+        self.table.setItemDelegateForColumn(CATEGORY_L1_COL, self.l1_delegate)
+        self.table.setItemDelegateForColumn(CATEGORY_L2_COL, self.l2_delegate)
+
         layout.addWidget(self.table)
 
         bottom_row = QHBoxLayout()
@@ -51,6 +64,19 @@ class NewItemsTab(QWidget):
         export_btn.clicked.connect(self._export)
         bottom_row.addWidget(export_btn)
         layout.addLayout(bottom_row)
+
+    def _category_l1_options(self, index) -> list[str]:
+        store_pk = self.get_active_store_pk()
+        if store_pk is None:
+            return []
+        return repo.distinct_category_values(self.conn, store_pk, "category_l1")
+
+    def _category_l2_options(self, index) -> list[str]:
+        store_pk = self.get_active_store_pk()
+        if store_pk is None:
+            return []
+        l1_value = index.sibling(index.row(), CATEGORY_L1_COL).data(Qt.EditRole) or None
+        return repo.distinct_category_values(self.conn, store_pk, "category_l2", parent_l1=l1_value)
 
     def refresh(self):
         store_pk = self.get_active_store_pk()

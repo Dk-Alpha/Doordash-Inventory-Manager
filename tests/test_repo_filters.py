@@ -93,6 +93,25 @@ def test_bulk_price_modes(conn, store):
     assert conn.execute("SELECT default_price FROM inventory_items WHERE id = ?", (item_id,)).fetchone()[0] == 5.0
 
 
+def test_distinct_category_values_dedupes_and_sorts(conn, store):
+    rows = [
+        {"upc_id": "1", "item_name": "Chips", "category_l1": "Snacks", "category_l2": "Chips", "default_price": "1", "status": "active"},
+        {"upc_id": "2", "item_name": "Pretzels", "category_l1": "Snacks", "category_l2": "Pretzels", "default_price": "1", "status": "active"},
+        {"upc_id": "3", "item_name": "Soda", "category_l1": "Beverages", "category_l2": "Soda", "default_price": "1", "status": "active"},
+        {"upc_id": "4", "item_name": "No category", "category_l1": "", "category_l2": "", "default_price": "1", "status": "active"},
+    ]
+    repo.import_master(conn, store, rows, "m.csv", {})
+
+    l1_values = repo.distinct_category_values(conn, store, "category_l1")
+    assert l1_values == ["Beverages", "Snacks"]
+
+    all_l2 = repo.distinct_category_values(conn, store, "category_l2")
+    assert set(all_l2) == {"Chips", "Pretzels", "Soda"}
+
+    snacks_l2 = repo.distinct_category_values(conn, store, "category_l2", parent_l1="Snacks")
+    assert set(snacks_l2) == {"Chips", "Pretzels"}
+
+
 def test_export_new_skus_blocks_on_missing_required_fields(conn, store, tmp_path):
     repo.import_master(conn, store, [{"upc_id": "1", "item_name": "A", "default_price": "1.00", "status": "active"}], "m.csv", {})
     repo.import_worklist(conn, store, [{"upc_id": "999", "item_name": "Incomplete"}], "w.csv", {})

@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (
 
 from app import repo
 from app.ui.bulk_price_dialog import BulkPriceDialog
+from app.ui.delegates import ComboBoxDelegate
 from app.ui.models import InventoryTableModel
 
 COLUMNS = [
@@ -21,6 +22,10 @@ COLUMNS = [
     ("change_flag", "Changed"),
 ]
 
+# +1 to account for the checkbox column the grid always prepends.
+CATEGORY_L1_COL = [f for f, _ in COLUMNS].index("category_l1") + 1
+CATEGORY_L2_COL = [f for f, _ in COLUMNS].index("category_l2") + 1
+
 DEBOUNCE_MS = 200
 
 
@@ -33,7 +38,7 @@ class ExistingItemsTab(QWidget):
 
         self.model = InventoryTableModel(
             conn, None, COLUMNS,
-            editable_fields=frozenset({"status", "default_price"}),
+            editable_fields=frozenset({"status", "default_price", "category_l1", "category_l2"}),
             on_cell_edit=self._on_cell_edit,
         )
 
@@ -73,12 +78,23 @@ class ExistingItemsTab(QWidget):
         self.changed_only = QCheckBox("Changed this session only")
         self.changed_only.stateChanged.connect(self._debounce.start)
         adv_layout.addWidget(self.changed_only)
+        adv_layout.addWidget(QLabel("Category"))
+        self.category_filter = QComboBox()
+        self.category_filter.addItem("All")
+        self.category_filter.currentIndexChanged.connect(self._debounce.start)
+        adv_layout.addWidget(self.category_filter)
         layout.addWidget(adv_box)
 
         self.table = QTableView()
         self.table.setModel(self.model)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
         self.table.horizontalHeader().setStretchLastSection(True)
+
+        self.l1_delegate = ComboBoxDelegate(self._category_l1_options, self.table)
+        self.l2_delegate = ComboBoxDelegate(self._category_l2_options, self.table)
+        self.table.setItemDelegateForColumn(CATEGORY_L1_COL, self.l1_delegate)
+        self.table.setItemDelegateForColumn(CATEGORY_L2_COL, self.l2_delegate)
+
         layout.addWidget(self.table)
 
         bulk_row = QHBoxLayout()
@@ -110,6 +126,7 @@ class ExistingItemsTab(QWidget):
 
     def _current_filters(self) -> dict:
         status_map = {"All": "all", "Active": "active", "Inactive": "inactive"}
+        category = self.category_filter.currentText()
         return {
             "status": status_map[self.status_combo.currentText()],
             "text1": self.filter1.text(),
@@ -118,6 +135,7 @@ class ExistingItemsTab(QWidget):
             "price_max": self.price_max.value() if self.price_max.value() < 1_000_000 else None,
             "changed_only": self.changed_only.isChecked(),
             "match_status": "existing",
+            "category_l1": category if category and category != "All" else None,
         }
 
     def apply_filters(self):
@@ -128,7 +146,35 @@ class ExistingItemsTab(QWidget):
         self.model.set_filters(self._current_filters())
         self.status_label.setText(f"Showing {self.model.rowCount()} of {self.model.total_count()} items")
 
+    def _refresh_category_filter_options(self):
+        store_pk = self.get_active_store_pk()
+        if store_pk is None:
+            return
+        categories = repo.distinct_category_values(self.conn, store_pk, "category_l1")
+        current = self.category_filter.currentText()
+        self.category_filter.blockSignals(True)
+        self.category_filter.clear()
+        self.category_filter.addItem("All")
+        self.category_filter.addItems(categories)
+        idx = self.category_filter.findText(current)
+        self.category_filter.setCurrentIndex(idx if idx >= 0 else 0)
+        self.category_filter.blockSignals(False)
+
+    def _category_l1_options(self, index) -> list[str]:
+        store_pk = self.get_active_store_pk()
+        if store_pk is None:
+            return []
+        return repo.distinct_category_values(self.conn, store_pk, "category_l1")
+
+    def _category_l2_options(self, index) -> list[str]:
+        store_pk = self.get_active_store_pk()
+        if store_pk is None:
+            return []
+        l1_value = index.sibling(index.row(), CATEGORY_L1_COL).data(Qt.EditRole) or None
+        return repo.distinct_category_values(self.conn, store_pk, "category_l2", parent_l1=l1_value)
+
     def refresh(self):
+        self._refresh_category_filter_options()
         self.apply_filters()
 
     # -- inline edit ------------------------------------------------------
@@ -143,6 +189,8 @@ class ExistingItemsTab(QWidget):
                 QMessageBox.warning(self, "Invalid price", f"'{raw_value}' is not a valid price.")
                 return False
             repo.apply_bulk_price(self.conn, [item_id], "set", price)
+        elif field in ("category_l1", "category_l2"):
+            repo.update_new_item_fields(self.conn, item_id, {field: raw_value})
         else:
             return False
         self.on_data_changed()

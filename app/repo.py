@@ -299,6 +299,36 @@ def list_items(conn: sqlite3.Connection, store_pk: int, filters: dict, limit: in
     return rows
 
 
+def distinct_category_values(conn: sqlite3.Connection, store_pk: int, field: str, parent_l1: Optional[str] = None) -> list[str]:
+    """Unique, non-blank category values already used in this store's
+    inventory -- backs both the category filter and the category dropdown
+    editors, so users pick from what already exists instead of retyping
+    (and mistyping) category names.
+
+    For field='category_l2', passing parent_l1 narrows the list to the L2
+    values that already co-occur with that L1 (a lightweight cascading
+    dropdown), since DoorDash's taxonomy is a real L1->L2 hierarchy.
+    """
+    if field not in ("category_l1", "category_l2"):
+        raise ValueError(f"Unsupported category field: {field}")
+
+    if field == "category_l2" and parent_l1:
+        rows = conn.execute(
+            """SELECT DISTINCT category_l2 FROM inventory_items
+               WHERE store_id = ? AND category_l1 = ? AND category_l2 IS NOT NULL AND category_l2 != ''
+               ORDER BY category_l2 COLLATE NOCASE""",
+            (store_pk, parent_l1),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            f"""SELECT DISTINCT {field} FROM inventory_items
+                WHERE store_id = ? AND {field} IS NOT NULL AND {field} != ''
+                ORDER BY {field} COLLATE NOCASE""",
+            (store_pk,),
+        ).fetchall()
+    return [r[0] for r in rows]
+
+
 # ---------------------------------------------------------- bulk actions ---
 
 def apply_bulk_status(conn: sqlite3.Connection, item_ids: list[int], to_status: str) -> str:

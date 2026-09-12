@@ -264,3 +264,22 @@ def test_bulk_set_worklist_items_status_and_price(conn, store):
     a = conn.execute("SELECT * FROM inventory_items WHERE upc_normalized = '1'").fetchone()
     assert a["default_price"] == 11.0
     assert a["status"] == "inactive"
+
+
+def test_export_updated_inventory_excludes_new_items(conn, store, tmp_path):
+    """Regression: new items (match_status='new') have no real sku_id yet --
+    they get one from DoorDash via the separate New SKU export. Including
+    them in the "Updated Inventory" re-upload produced a blank sku_id cell
+    that DoorDash's importer rejected as "unknown sku id: undefined"."""
+    repo.import_master(conn, store, [
+        {"upc_id": "1", "sku_id": "SKU-1", "item_name": "Chips", "default_price": "2.50", "status": "active"},
+    ], "master.csv", {})
+    repo.import_worklist(conn, store, [
+        {"upc_id": "999", "item_name": "Brand New Item", "new_price": "4.00"},
+    ], "worklist.csv", {})
+
+    out_path = export.export_updated_inventory(conn, store, str(tmp_path / "updated.csv"))
+    content = open(out_path).read()
+    assert "Chips" in content
+    assert "SKU-1" in content
+    assert "Brand New Item" not in content

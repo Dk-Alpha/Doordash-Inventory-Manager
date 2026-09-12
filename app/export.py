@@ -49,9 +49,17 @@ def _write_csv(path: str, rows: list[dict]) -> str:
 
 
 def export_updated_inventory(conn: sqlite3.Connection, store_pk: int, path: str) -> str:
+    """The full re-upload CSV for DoorDash's *existing* catalog. Deliberately
+    excludes match_status='new' rows -- those don't have a real sku_id yet
+    (DoorDash assigns one when they're onboarded via export_new_skus), so
+    including them here used to produce a blank sku_id cell that DoorDash's
+    importer rejected as an "unknown sku id: undefined" row. This also
+    matches what the export confirmation dialog already promises the user
+    ("N new SKU(s) will need a separate export")."""
     store = conn.execute("SELECT * FROM stores WHERE id = ?", (store_pk,)).fetchone()
     items = conn.execute(
-        "SELECT * FROM inventory_items WHERE store_id = ? ORDER BY item_name COLLATE NOCASE", (store_pk,)
+        "SELECT * FROM inventory_items WHERE store_id = ? AND match_status = 'existing' ORDER BY item_name COLLATE NOCASE",
+        (store_pk,),
     ).fetchall()
     rows = [_row_to_export_dict(item, store) for item in items]
     return _write_csv(path, rows)

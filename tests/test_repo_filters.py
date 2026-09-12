@@ -150,6 +150,13 @@ def test_bulk_price_modes(conn, store):
     repo.apply_bulk_price(conn, [item_id], "set", 5.0)
     assert conn.execute("SELECT default_price FROM inventory_items WHERE id = ?", (item_id,)).fetchone()[0] == 5.0
 
+    repo.apply_bulk_price(conn, [item_id], "multiply", 1.25)
+    assert conn.execute("SELECT default_price FROM inventory_items WHERE id = ?", (item_id,)).fetchone()[0] == 6.25
+
+
+def test_compute_new_price_multiply_matches_equivalent_percent_increase():
+    assert repo.compute_new_price(10.0, "multiply", 1.25) == repo.compute_new_price(10.0, "inc_pct", 25)
+
 
 def test_list_item_ids_returns_all_matches_unpaginated(conn, store):
     rows = [{"upc_id": str(i), "item_name": f"Item {i}", "default_price": "1", "status": "active"} for i in range(1, 6)]

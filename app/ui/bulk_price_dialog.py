@@ -10,6 +10,7 @@ MODES = [
     ("dec_pct", "Decrease by %"),
     ("inc_amt", "Increase by amount"),
     ("dec_amt", "Decrease by amount"),
+    ("multiply", "Multiply by (e.g. 1.25 = current price + 25%)"),
 ]
 
 
@@ -36,6 +37,14 @@ class BulkPriceDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+
+        # "multiply" defaulting to 0 would silently zero out every price if
+        # left untouched -- 1.0 (no-op) is a much safer default for that mode.
+        self.mode_combo.currentIndexChanged.connect(self._on_mode_changed)
+
+    def _on_mode_changed(self):
+        if self.mode() == "multiply" and self.value_spin.value() == 0:
+            self.value_spin.setValue(1.0)
 
     def mode(self) -> str:
         return self.mode_combo.currentData()

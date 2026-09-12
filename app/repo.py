@@ -611,6 +611,8 @@ def compute_new_price(current_price: Optional[float], mode: str, value: float) -
         return round(base + value, 2)
     if mode == "dec_amt":
         return round(base - value, 2)
+    if mode == "multiply":
+        return round(base * value, 2)
     raise ValueError(f"Unknown price mode: {mode}")
 
 

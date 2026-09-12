@@ -41,6 +41,7 @@ class ExistingItemsTab(QWidget):
             editable_fields=frozenset({"status", "default_price", "category_l1", "category_l2"}),
             on_cell_edit=self._on_cell_edit,
         )
+        self.model.dataChanged.connect(lambda *args: self._update_status_label())
 
         self._debounce = QTimer(self)
         self._debounce.setSingleShot(True)
@@ -99,10 +100,16 @@ class ExistingItemsTab(QWidget):
 
         bulk_row = QHBoxLayout()
         select_all_btn = QPushButton("Select All Loaded")
-        select_all_btn.clicked.connect(lambda: self.model.check_all_loaded(True))
+        select_all_btn.clicked.connect(self._select_all_loaded)
         bulk_row.addWidget(select_all_btn)
+        select_all_filtered_btn = QPushButton("Select All Matching Filter")
+        select_all_filtered_btn.setToolTip(
+            "Selects every item matching the current filter, even ones not yet scrolled into view."
+        )
+        select_all_filtered_btn.clicked.connect(self._select_all_matching_filter)
+        bulk_row.addWidget(select_all_filtered_btn)
         clear_btn = QPushButton("Clear Selection")
-        clear_btn.clicked.connect(lambda: self.model.check_all_loaded(False))
+        clear_btn.clicked.connect(self._clear_selection)
         bulk_row.addWidget(clear_btn)
 
         activate_btn = QPushButton("Activate Selected")
@@ -144,7 +151,25 @@ class ExistingItemsTab(QWidget):
             return
         self.model.store_pk = store_pk
         self.model.set_filters(self._current_filters())
-        self.status_label.setText(f"Showing {self.model.rowCount()} of {self.model.total_count()} items")
+        self._update_status_label()
+
+    def _update_status_label(self):
+        self.status_label.setText(
+            f"Showing {self.model.rowCount()} of {self.model.total_count()} items — "
+            f"{self.model.checked_count()} selected in total (across any filter)"
+        )
+
+    def _select_all_loaded(self):
+        self.model.select_all_loaded()
+        self._update_status_label()
+
+    def _select_all_matching_filter(self):
+        self.model.select_all_matching_filter()
+        self._update_status_label()
+
+    def _clear_selection(self):
+        self.model.clear_selection()
+        self._update_status_label()
 
     def _refresh_category_filter_options(self):
         store_pk = self.get_active_store_pk()

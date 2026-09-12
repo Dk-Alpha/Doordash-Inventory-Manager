@@ -38,9 +38,14 @@ class InventoryTableModel(QAbstractTableModel):
         self.refresh()
 
     def refresh(self):
+        """Reload rows for the current filter/store. Deliberately does NOT
+        touch self._checked: a checkbox selection is meant to survive
+        filter changes (and even a store switch), so you can check some
+        items under one filter, narrow/change the filter, check more, and
+        run one bulk action across everything you've checked -- visible or
+        not. Use clear_selection() to explicitly empty it."""
         self.beginResetModel()
         self._rows = []
-        self._checked = set()
         self._total = repo.count_items(self.conn, self.store_pk, self.filters)
         self._rows = list(repo.list_items(self.conn, self.store_pk, self.filters, limit=PAGE_SIZE, offset=0))
         self.endResetModel()
@@ -134,12 +139,30 @@ class InventoryTableModel(QAbstractTableModel):
     def checked_ids(self) -> list[int]:
         return list(self._checked)
 
-    def check_all_loaded(self, checked: bool):
+    def checked_count(self) -> int:
+        return len(self._checked)
+
+    def select_all_loaded(self):
+        """Add every currently-fetched row to the selection (union, not
+        replace) -- doesn't disturb items checked earlier under a different
+        filter/page that aren't loaded right now."""
         self.beginResetModel()
-        if checked:
-            self._checked = {r["id"] for r in self._rows}
-        else:
-            self._checked = set()
+        self._checked |= {r["id"] for r in self._rows}
+        self.endResetModel()
+
+    def select_all_matching_filter(self):
+        """Add every row matching the current filter to the selection, not
+        just the page that happens to be loaded -- satisfies "select all in
+        the filtered view" even for a filter that matches more rows than
+        one page."""
+        ids = repo.list_item_ids(self.conn, self.store_pk, self.filters)
+        self.beginResetModel()
+        self._checked |= set(ids)
+        self.endResetModel()
+
+    def clear_selection(self):
+        self.beginResetModel()
+        self._checked = set()
         self.endResetModel()
 
     def total_count(self) -> int:

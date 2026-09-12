@@ -299,6 +299,15 @@ def list_items(conn: sqlite3.Connection, store_pk: int, filters: dict, limit: in
     return rows
 
 
+def list_item_ids(conn: sqlite3.Connection, store_pk: int, filters: dict) -> list[int]:
+    """All item ids matching a filter, unpaginated -- backs "select all
+    matching this filter" for bulk actions, as distinct from only the rows
+    a paginated grid happens to have fetched so far."""
+    where, params = build_filter_query(store_pk, filters)
+    rows = conn.execute(f"SELECT id FROM inventory_items WHERE {where}", params).fetchall()
+    return [r["id"] for r in rows]
+
+
 def distinct_category_values(conn: sqlite3.Connection, store_pk: int, field: str, parent_l1: Optional[str] = None) -> list[str]:
     """Unique, non-blank category values already used in this store's
     inventory -- backs both the category filter and the category dropdown

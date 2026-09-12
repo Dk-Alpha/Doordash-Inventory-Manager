@@ -93,6 +93,14 @@ def test_bulk_price_modes(conn, store):
     assert conn.execute("SELECT default_price FROM inventory_items WHERE id = ?", (item_id,)).fetchone()[0] == 5.0
 
 
+def test_list_item_ids_returns_all_matches_unpaginated(conn, store):
+    rows = [{"upc_id": str(i), "item_name": f"Item {i}", "default_price": "1", "status": "active"} for i in range(1, 6)]
+    repo.import_master(conn, store, rows, "m.csv", {})
+    ids = repo.list_item_ids(conn, store, {"status": "active"})
+    assert len(ids) == 5
+    assert all(isinstance(i, int) for i in ids)
+
+
 def test_distinct_category_values_dedupes_and_sorts(conn, store):
     rows = [
         {"upc_id": "1", "item_name": "Chips", "category_l1": "Snacks", "category_l2": "Chips", "default_price": "1", "status": "active"},
